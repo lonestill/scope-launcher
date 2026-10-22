@@ -391,6 +391,8 @@ async function installCurseForgeModpack({
             stage: "downloading_pack",
             progress: 0.1 + (p.received / (p.total || 1)) * 0.2,
             message: `Downloading modpack (${Math.round((p.received / 1024 / 1024) * 10) / 10} MB)…`,
+            received: p.received,
+            total: p.total,
             speed: p.speed,
             eta: p.eta,
           });
@@ -463,6 +465,10 @@ async function installCurseForgeModpack({
           stage: "downloading_mods",
           progress: 0.45 + ratio * 0.45,
           message: `Downloading mods (${p.completed}/${p.count})…`,
+          received: p.received,
+          total: p.total,
+          completed: p.completed,
+          count: p.count,
           speed: p.speed,
           eta: p.eta,
         });

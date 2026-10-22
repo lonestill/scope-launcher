@@ -469,6 +469,8 @@ export interface DownloadProgress {
   name?: string;
   subtitle?: string;
   iconUrl?: string | null;
+  speed?: number;
+  eta?: number;
 }
 
 export interface PlayResult {

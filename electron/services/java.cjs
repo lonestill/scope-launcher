@@ -154,7 +154,7 @@ class JavaService {
       sha256: selected.sha256,
       size: selected.size,
       signal,
-      onProgress: ({ received, total }) => {
+      onProgress: ({ received, total, speed, eta }) => {
         const progress = total ? Math.round((received / total) * 72) : 8;
         onProgress?.({
           stage: "java",
@@ -162,6 +162,8 @@ class JavaService {
           message: `Downloading Java ${requiredMajor}…`,
           received,
           total,
+          speed: speed ?? undefined,
+          eta: eta ?? undefined,
         });
       },
     });

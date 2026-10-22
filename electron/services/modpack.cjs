@@ -223,7 +223,10 @@ class ModpackService {
         onProgress?.({
           stage: "overrides",
           progress: 11 + Math.round((extracted / Math.max(count, 1)) * 9),
-          message: `Extracting configuration: ${current}`,
+          message:
+            count > 1
+              ? `Extracting configuration (${extracted}/${count})…`
+              : `Extracting configuration: ${current}`,
         }),
     });
     signal?.throwIfAborted();
@@ -255,7 +258,10 @@ class ModpackService {
         onProgress?.({
           stage: "content",
           progress: 20 + Math.round(Math.max(byFiles, byBytes) * 44),
-          message: `Installing mods: ${current}`,
+          message:
+            count > 1
+              ? `Downloading mods (${completed}/${count})…`
+              : `Downloading mod: ${current}`,
           completed,
           count,
           received,

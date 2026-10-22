@@ -188,6 +188,7 @@ function DownloadRow({
               <motion.i
                 initial={{ width: 0 }}
                 animate={{ width: `${Math.max(task.progress, 2)}%` }}
+                transition={{ duration: 0.8, ease: "linear" }}
               />
             </div>
             {task.speed ? (
@@ -198,7 +199,13 @@ function DownloadRow({
             ) : null}
             <div className="download-row__stats">
               <span>
-                {formatBytes(task.received, locale)} / {formatBytes(task.total, locale)}
+                {typeof task.total === "number" && task.total > 0 && typeof task.received === "number"
+                  ? `${formatBytes(Math.min(task.received, task.total), locale)} / ${formatBytes(task.total, locale)}`
+                  : typeof task.received === "number" && task.received > 0
+                    ? formatBytes(task.received, locale)
+                    : task.status === "installing"
+                      ? t("downloads.status.installing", { progress: task.progress })
+                      : ""}
               </span>
               <span>{t("downloads.integrity")}</span>
             </div>

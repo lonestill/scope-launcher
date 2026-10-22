@@ -339,38 +339,63 @@ async function downloadMany(items, options = {}) {
     return sum + (Number.isFinite(s) && s > 0 ? s : 0);
   }, 0);
   const inFlight = new Map();
-  const speeds = new Map();
   let completedBytes = 0;
   let completed = 0;
   let cursor = 0;
+  let lastReportTime = 0;
 
-  const report = (item, progress) => {
-    const rec = Number(progress?.received) || 0;
-    inFlight.set(item.destination, rec);
-    if (progress?.speed) {
-      speeds.set(item.destination, progress.speed);
+  let lastSpeedBytes = 0;
+  let lastSpeedTime = Date.now();
+  let speedSamples = [];
+  let currentSpeed = 0;
+
+  const emitProgress = (item, force = false) => {
+    const now = Date.now();
+    const isFinished = completed >= items.length;
+    if (!force && !isFinished && now - lastReportTime < 1000) {
+      return;
     }
+    lastReportTime = now;
+
     let inFlightSum = 0;
     for (const b of inFlight.values()) {
       inFlightSum += b;
     }
-    let totalSpeed = 0;
-    for (const s of speeds.values()) {
-      totalSpeed += s;
+
+    const rawReceived = completedBytes + inFlightSum;
+    const total = knownTotalBytes > 0 ? Math.max(knownTotalBytes, rawReceived) : rawReceived;
+    const received = Math.min(rawReceived, total);
+
+    const elapsed = (now - lastSpeedTime) / 1000;
+    if (elapsed >= 0.5) {
+      const bytesDelta = received - lastSpeedBytes;
+      const instantSpeed = bytesDelta > 0 && elapsed > 0 ? bytesDelta / elapsed : 0;
+      speedSamples = [...speedSamples, instantSpeed].slice(-5);
+      currentSpeed = speedSamples.length > 0
+        ? Math.round(speedSamples.reduce((a, b) => a + b, 0) / speedSamples.length)
+        : 0;
+      lastSpeedBytes = received;
+      lastSpeedTime = now;
     }
-    const received = completedBytes + inFlightSum;
-    const total = knownTotalBytes > 0 ? knownTotalBytes : received;
+
     const eta =
-      totalSpeed > 0 && total > received ? (total - received) / totalSpeed : null;
+      currentSpeed > 0 && total > received ? (total - received) / currentSpeed : null;
+
     options.onProgress?.({
       completed,
       count: items.length,
       received,
       total,
-      speed: totalSpeed,
-      eta,
-      current: path.basename(item.destination),
+      speed: currentSpeed > 0 ? currentSpeed : undefined,
+      eta: eta ?? undefined,
+      current: item ? path.basename(item.destination) : "",
     });
+  };
+
+  const report = (item, progress) => {
+    const rec = Number(progress?.received) || 0;
+    inFlight.set(item.destination, rec);
+    emitProgress(item);
   };
 
   const worker = async () => {
@@ -384,20 +409,18 @@ async function downloadMany(items, options = {}) {
         signal: options.signal,
         onProgress: (progress) => report(item, progress),
       });
+      const finalItemBytes = inFlight.get(item.destination) || Number(item.size) || 0;
       inFlight.delete(item.destination);
-      speeds.delete(item.destination);
-      completedBytes += Number(item.size) || 0;
+      completedBytes += finalItemBytes;
       completed += 1;
-      report(item, {
-        received: Number(item.size) || 0,
-        total: Number(item.size) || 0,
-      });
+      emitProgress(item, completed >= items.length);
     }
   };
 
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length || 1) }, worker),
   );
+  emitProgress(null, true);
 }
 
 module.exports = {

@@ -752,20 +752,105 @@ async function restoreLauncherWindow() {
   mainWindow.focus();
 }
 
-function taskUpdate(task, patch) {
+const taskLastEmits = new Map();
+const taskTrailingTimers = new Map();
+
+function taskUpdate(task, patch, force = false) {
   Object.assign(task, patch);
-  send("download:progress", structuredClone(task));
-  if (
-    patch.status === "done" &&
-    state.settings.notifications &&
-    Notification.isSupported()
-  ) {
-    new Notification({
-      title: "Scope Launcher",
-      body: `${task.name}: installation completed`,
-      silent: false,
-    }).show();
+  const now = Date.now();
+  const lastEmit = taskLastEmits.get(task.id) || 0;
+  const isTerminal = ["done", "error", "cancelled"].includes(patch.status || task.status);
+
+  if (isTerminal) {
+    const activeTimer = taskTrailingTimers.get(task.id);
+    if (activeTimer) {
+      clearTimeout(activeTimer);
+      taskTrailingTimers.delete(task.id);
+    }
+    taskLastEmits.set(task.id, now);
+    send("download:progress", structuredClone(task));
+    if (
+      patch.status === "done" &&
+      state.settings.notifications &&
+      Notification.isSupported()
+    ) {
+      new Notification({
+        title: "Scope Launcher",
+        body: `${task.name}: installation completed`,
+        silent: false,
+      }).show();
+    }
+    return;
   }
+
+  if (force || now - lastEmit >= 1000) {
+    const activeTimer = taskTrailingTimers.get(task.id);
+    if (activeTimer) {
+      clearTimeout(activeTimer);
+      taskTrailingTimers.delete(task.id);
+    }
+    taskLastEmits.set(task.id, now);
+    send("download:progress", structuredClone(task));
+  } else if (!taskTrailingTimers.has(task.id)) {
+    const remaining = 1000 - (now - lastEmit);
+    const timer = setTimeout(() => {
+      taskTrailingTimers.delete(task.id);
+      taskLastEmits.set(task.id, Date.now());
+      send("download:progress", structuredClone(task));
+    }, Math.max(50, remaining));
+    taskTrailingTimers.set(task.id, timer);
+  }
+}
+
+function isDownloadingStage(stage) {
+  return [
+    "pack",
+    "content",
+    "minecraft",
+    "java",
+    "loader",
+    "downloading",
+    "downloading_pack",
+    "downloading_mods",
+  ].includes(stage);
+}
+
+function createProgressTracker() {
+  let lastStage = null;
+  let stageBaseReceived = 0;
+  let accumulatedTotal = 0;
+  let currentStageTotal = 0;
+
+  return (progress) => {
+    const stage = progress.stage || "default";
+    if (stage !== lastStage) {
+      if (currentStageTotal > 0) {
+        stageBaseReceived += currentStageTotal;
+        accumulatedTotal += currentStageTotal;
+      }
+      currentStageTotal = 0;
+      lastStage = stage;
+    }
+
+    if (typeof progress.total === "number" && progress.total > 0) {
+      currentStageTotal = Math.max(currentStageTotal, progress.total);
+    }
+
+    const hasBytes = typeof progress.received === "number";
+    const total = accumulatedTotal + currentStageTotal || undefined;
+    const received = hasBytes
+      ? Math.min(stageBaseReceived + progress.received, total || Infinity)
+      : stageBaseReceived > 0
+        ? stageBaseReceived
+        : undefined;
+
+    return {
+      received,
+      total,
+      speed: progress.speed,
+      eta: progress.eta,
+    };
+  };
 }
 
 function instanceUpdate(instance, patch) {
@@ -2828,6 +2913,7 @@ function registerIpc() {
                 status: "downloading",
                 subtitle: "Downloading CurseForge modpack",
               });
+              const tracker = createProgressTracker();
               const res = await curseforgeService.installCurseForgeModpack({
                 instancesRoot:
                   state.settings.gameDirectory ||
@@ -2837,15 +2923,18 @@ function registerIpc() {
                 packName: project.title,
                 signal: controller.signal,
                 onProgress: (p) => {
+                  const tracked = tracker(p);
                   taskUpdate(task, {
                     status:
-                      p.stage && p.stage.startsWith("downloading")
+                      p.stage && (p.stage.startsWith("downloading") || isDownloadingStage(p.stage))
                         ? "downloading"
                         : "installing",
                     progress: Math.round((p.progress || 0) * 100),
                     subtitle: p.message,
-                    speed: p.speed,
-                    eta: p.eta,
+                    received: tracked.received,
+                    total: tracked.total,
+                    speed: tracked.speed,
+                    eta: tracked.eta,
                   });
                 },
               });
@@ -2856,21 +2945,25 @@ function registerIpc() {
                 status: "downloading",
                 subtitle: "Downloading modpack",
               });
+              const tracker = createProgressTracker();
               instance = await modpackService.installProject({
                 project,
                 settings: state.settings,
                 instanceId: task.instanceId,
-                onProgress: (progress) =>
+                onProgress: (progress) => {
+                  const tracked = tracker(progress);
                   taskUpdate(task, {
-                    status:
-                      progress.stage === "pack" ? "downloading" : "installing",
+                    status: isDownloadingStage(progress.stage)
+                      ? "downloading"
+                      : "installing",
                     progress: progress.progress,
                     subtitle: progress.message,
-                    received: progress.received,
-                    total: progress.total,
-                    speed: progress.speed,
-                    eta: progress.eta,
-                  }),
+                    received: tracked.received,
+                    total: tracked.total,
+                    speed: tracked.speed,
+                    eta: tracked.eta,
+                  });
+                },
                 signal: controller.signal,
               });
             }
@@ -2944,16 +3037,25 @@ function registerIpc() {
     void (async () => {
       try {
         const { modpackService } = createServices();
+        const tracker = createProgressTracker();
         const instance = await modpackService.installPack({
           packPath,
           settings: state.settings,
           instanceId: task.instanceId,
-          onProgress: (progress) =>
+          onProgress: (progress) => {
+            const tracked = tracker(progress);
             taskUpdate(task, {
-              status: "installing",
+              status: isDownloadingStage(progress.stage)
+                ? "downloading"
+                : "installing",
               progress: progress.progress,
               subtitle: progress.message,
-            }),
+              received: tracked.received,
+              total: tracked.total,
+              speed: tracked.speed,
+              eta: tracked.eta,
+            });
+          },
           signal: controller.signal,
         });
         state.instances.unshift(instance);
@@ -3064,21 +3166,82 @@ function registerIpc() {
     },
   );
   ipcMain.handle("curseforge:install-modpack", async (_event, options) => {
-    const res = await curseforgeService.installCurseForgeModpack({
-      instancesRoot: state.settings.gameDirectory,
-      ...options,
-    });
-    if (res?.metadata) {
-      const existing = state.instances.findIndex((i) => i.id === res.metadata.id);
-      if (existing >= 0) {
-        state.instances[existing] = res.metadata;
-      } else {
-        state.instances.unshift(res.metadata);
+    const task = {
+      id: crypto.randomUUID(),
+      projectId: String(options?.modId || ""),
+      projectType: "modpack",
+      name: options?.packName || "CurseForge Modpack",
+      subtitle: "Preparing installation",
+      iconUrl: options?.iconUrl || null,
+      progress: 1,
+      status: "downloading",
+      createdAt: new Date().toISOString(),
+      instanceId: crypto.randomUUID(),
+    };
+    state.downloads.unshift(task);
+    state.downloads = state.downloads.slice(0, 50);
+    await saveState();
+    taskUpdate(task, {});
+    const controller = new AbortController();
+    downloadControllers.set(task.id, controller);
+
+    try {
+      const tracker = createProgressTracker();
+      const res = await curseforgeService.installCurseForgeModpack({
+        instancesRoot: state.settings.gameDirectory,
+        instanceId: task.instanceId,
+        ...options,
+        signal: controller.signal,
+        onProgress: (p) => {
+          const tracked = tracker(p);
+          taskUpdate(task, {
+            status:
+              p.stage && (p.stage.startsWith("downloading") || isDownloadingStage(p.stage))
+                ? "downloading"
+                : "installing",
+            progress: Math.round((p.progress || 0) * 100),
+            subtitle: p.message,
+            received: tracked.received,
+            total: tracked.total,
+            speed: tracked.speed,
+            eta: tracked.eta,
+          });
+        },
+      });
+      if (res?.metadata) {
+        const existing = state.instances.findIndex((i) => i.id === res.metadata.id);
+        if (existing >= 0) {
+          state.instances[existing] = res.metadata;
+        } else {
+          state.instances.unshift(res.metadata);
+        }
+        send("instance:updated", structuredClone(res.metadata));
+        taskUpdate(task, {
+          status: "done",
+          progress: 100,
+          subtitle: "The modpack is installed and ready to play",
+          localPath: path.join(state.settings.gameDirectory, res.metadata.id),
+          instanceId: res.metadata.id,
+        });
+        await saveState();
       }
-      send("instance:updated", structuredClone(res.metadata));
+      return res;
+    } catch (error) {
+      const cancelled =
+        controller.signal.aborted || error?.name === "AbortError";
+      taskUpdate(task, {
+        status: cancelled ? "cancelled" : "error",
+        error: cancelled
+          ? "Installation cancelled by the user"
+          : error instanceof Error
+            ? error.message
+            : "Unknown installation error",
+      });
       await saveState();
+      throw error;
+    } finally {
+      downloadControllers.delete(task.id);
     }
-    return res;
   });
 
   ipcMain.handle("launcher:preflight", async (_event, instanceId) => {

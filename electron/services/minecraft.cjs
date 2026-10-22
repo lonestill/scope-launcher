@@ -476,7 +476,7 @@ class MinecraftService {
     await downloadMany(downloads, {
       concurrency: 10,
       signal,
-      onProgress: ({ completed, count, received, total, current }) => {
+      onProgress: ({ completed, count, received, total, speed, eta, current }) => {
         const fileProgress = count ? completed / count : 1;
         const byteProgress = total && total > 0 ? received / total : fileProgress;
         const ratio = total && total > 0 ? Math.min(1, Math.max(0, byteProgress)) : fileProgress;
@@ -485,11 +485,16 @@ class MinecraftService {
         onProgress?.({
           stage: "minecraft",
           progress: highestProgress,
-          message: `Installing Minecraft ${versionId}: ${current}`,
+          message:
+            count > 1
+              ? `Downloading Minecraft assets (${completed}/${count})…`
+              : `Installing Minecraft ${versionId}`,
           completed,
           count,
           received,
           total,
+          speed: speed ?? undefined,
+          eta: eta ?? undefined,
         });
       },
     });
@@ -659,11 +664,20 @@ class MinecraftService {
     await downloadMany(items, {
       concurrency: 8,
       signal,
-      onProgress: ({ completed, count, current }) =>
+      onProgress: ({ completed, count, received, total, speed, eta, current }) =>
         onProgress?.({
           stage: "loader",
           progress: 88 + Math.round((completed / Math.max(count, 1)) * 10),
-          message: `Installing loader: ${current}`,
+          message:
+            count > 1
+              ? `Downloading loader libraries (${completed}/${count})…`
+              : `Installing loader: ${current}`,
+          completed,
+          count,
+          received,
+          total,
+          speed: speed ?? undefined,
+          eta: eta ?? undefined,
         }),
     });
   }
@@ -731,11 +745,15 @@ class MinecraftService {
       url: `${base}/${coordinate}/${artifact}-${coordinate}-installer.jar`,
       destination: installer,
       signal,
-      onProgress: ({ received, total }) =>
+      onProgress: ({ received, total, speed, eta }) =>
         onProgress?.({
           stage: "loader",
           progress: 88 + (total ? Math.round((received / total) * 4) : 1),
           message: `Downloading installer for ${loader}…`,
+          received,
+          total,
+          speed: speed ?? undefined,
+          eta: eta ?? undefined,
         }),
     });
 
