@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { useI18n, type TranslationKey } from "../i18n";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { DiscordIcon } from "./DiscordIcon";
 import type { GameInstance, RouteId } from "../types";
 
@@ -25,6 +26,7 @@ interface CommandPaletteProps {
   onNavigate: (route: RouteId) => void;
   onPlay: (instance: GameInstance) => void;
   onCreate: () => void;
+  onSearchCatalog: (query: string, type: "mod" | "modpack") => void;
   onJoinParty?: () => void;
 }
 
@@ -69,8 +71,10 @@ export function CommandPalette({
   onPlay,
   onCreate,
   onJoinParty,
+  onSearchCatalog,
 }: CommandPaletteProps) {
   const { t } = useI18n();
+  const dialogRef = useDialogFocus(open, onClose);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
 
@@ -147,12 +151,20 @@ export function CommandPalette({
   const matchingActions = useMemo(() => {
     if (!query.trim()) return allActions;
     const q = query.toLowerCase();
-    return allActions.filter((action) =>
+    const catalogActions = (["mod", "modpack"] as const).map((type) => ({
+      id: `catalog-${type}`,
+      title: t(type === "mod" ? "command.searchMods" : "command.searchPacks", { query: query.trim() }),
+      hint: t("command.catalogHint"),
+      icon: Search,
+      keywords: "",
+      run: () => onSearchCatalog(query.trim(), type),
+    }));
+    return [...catalogActions, ...allActions.filter((action) =>
       `${action.title} ${action.hint} ${action.keywords}`
         .toLowerCase()
         .includes(q),
-    );
-  }, [allActions, query]);
+    )];
+  }, [allActions, query, onSearchCatalog, t]);
 
   const visibleInstances = matchingInstances.slice(0, 4);
   const actionCount =
@@ -187,6 +199,8 @@ export function CommandPalette({
         >
           <motion.div
             className="command-palette"
+            ref={dialogRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-label={t("command.dialog")}
@@ -198,18 +212,17 @@ export function CommandPalette({
             <div className="command-search">
               <Search size={19} />
               <input
-                autoFocus
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={t("command.placeholder")}
                 onKeyDown={(event) => {
                   if (event.key === "ArrowDown") {
                     event.preventDefault();
-                    setActiveIndex((value) => (value + 1) % actionCount);
+                    setActiveIndex((value) => (value + 1) % Math.max(1, actionCount));
                   } else if (event.key === "ArrowUp") {
                     event.preventDefault();
                     setActiveIndex(
-                      (value) => (value - 1 + actionCount) % actionCount,
+                      (value) => (value - 1 + actionCount) % Math.max(1, actionCount),
                     );
                   } else if (event.key === "Enter") {
                     event.preventDefault();
@@ -217,7 +230,7 @@ export function CommandPalette({
                   }
                 }}
               />
-              <button onClick={onClose}>
+              <button onClick={onClose} aria-label={t("common.close")}>
                 <X size={16} />
               </button>
             </div>
@@ -246,7 +259,7 @@ export function CommandPalette({
                           {instance.version} · {instance.loader}
                         </small>
                       </span>
-                      <kbd>{t("command.play")}</kbd>
+                      <kbd>{t(instance.status === "setup" || instance.status === "pack-ready" ? "home.action.install" : "command.play")}</kbd>
                       <ArrowRight size={15} />
                     </button>
                   ))}

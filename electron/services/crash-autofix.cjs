@@ -3,6 +3,9 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 const StreamZip = require("node-stream-zip");
+const crypto = require("node:crypto");
+const { currentLaunchLog } = require("./launch-log.cjs");
+const { satisfiesMinecraftVersion } = require("./version-range.cjs");
 
 /**
  * @typedef {'increase-memory' | 'switch-java' | 'install-indium' | 'install-missing-dependency' | 'disable-culprit-mod' | 'remove-duplicate-mod' | 'resolve-mod-conflict' | 'reset-corrupted-config' | 'reset-jvm-args' | 'clean-corrupted-file'} AutoFixType
@@ -80,7 +83,7 @@ async function inspectJarMetadata(jarPath) {
         const json = JSON.parse(data.toString("utf8"));
         modId = json.quilt_loader?.id;
         name = json.quilt_loader?.metadata?.name || modId;
-        version = json.quilt_loader?.metadata?.version || null;
+        version = json.quilt_loader?.version || null;
         const mcDep = json.quilt_loader?.depends?.find(
           (d) => d.id === "minecraft" || (typeof d === "string" && d === "minecraft"),
         );
@@ -93,7 +96,8 @@ async function inspectJarMetadata(jarPath) {
         const tomlText = data.toString("utf8");
         const modIdMatch = tomlText.match(/modId\s*=\s*["']([^"']+)["']/);
         modId = modIdMatch ? modIdMatch[1] : null;
-        const verMatch = tomlText.match(/versionRange\s*=\s*["']([^"']+)["']/);
+        const minecraftDependency = tomlText.split(/(?=^\s*\[\[dependencies\.)/m).find((section) => /^\s*\[\[dependencies\./m.test(section) && /modId\s*=\s*["']minecraft["']/.test(section));
+        const verMatch = minecraftDependency?.match(/versionRange\s*=\s*["']([^"']+)["']/);
         mcVersionRange = verMatch ? verMatch[1] : null;
         const versionMatch = tomlText.match(/version\s*=\s*["']([^"']+)["']/);
         version = versionMatch ? versionMatch[1] : null;
@@ -105,7 +109,8 @@ async function inspectJarMetadata(jarPath) {
         const tomlText = data.toString("utf8");
         const modIdMatch = tomlText.match(/modId\s*=\s*["']([^"']+)["']/);
         modId = modIdMatch ? modIdMatch[1] : null;
-        const verMatch = tomlText.match(/versionRange\s*=\s*["']([^"']+)["']/);
+        const minecraftDependency = tomlText.split(/(?=^\s*\[\[dependencies\.)/m).find((section) => /^\s*\[\[dependencies\./m.test(section) && /modId\s*=\s*["']minecraft["']/.test(section));
+        const verMatch = minecraftDependency?.match(/versionRange\s*=\s*["']([^"']+)["']/);
         mcVersionRange = verMatch ? verMatch[1] : null;
         const versionMatch = tomlText.match(/version\s*=\s*["']([^"']+)["']/);
         version = versionMatch ? versionMatch[1] : null;
@@ -131,9 +136,17 @@ async function inspectJarMetadata(jarPath) {
       version,
       loader,
       mcVersionRange,
+      mixinConfigs: Object.keys(entries).filter((name) => /mixins?\.json$/i.test(name)),
+      supportedLoaders: [
+        entries["fabric.mod.json"] && "fabric",
+        entries["quilt.mod.json"] && "quilt",
+        entries["META-INF/mods.toml"] && "forge",
+        entries["META-INF/neoforge.mods.toml"] && "neoforge",
+      ].filter(Boolean),
       corrupted: false,
     };
   } catch (err) {
+    if (["ENOENT", "EACCES", "EPERM", "EISDIR"].includes(err.code)) return { fileName: path.basename(jarPath), jarPath, corrupted: false, unreadable: true, error: err.message };
     return {
       fileName: path.basename(jarPath),
       jarPath,
@@ -158,58 +171,40 @@ function checkModCompatibility(modMeta, instance) {
     };
   }
 
-  const instLoader = (instance.loader || "").toLowerCase();
+  const instLoader = String(instance.installProfile?.loader || instance.loader || "").trim().split(/\s+/)[0].toLowerCase();
   const instVersion = instance.version || instance.installProfile?.minecraftVersion || "";
 
-  // 1. Check Loader Mismatch
-  if (modMeta.loader) {
-    const isFabricFamily = instLoader === "fabric" || instLoader === "quilt";
-    const isForgeFamily = instLoader === "forge" || instLoader === "neoforge";
-
-    if (isFabricFamily && (modMeta.loader === "forge" || modMeta.loader === "neoforge")) {
-      return {
-        incompatible: true,
-        reason: "loader-mismatch",
-        modLoader: modMeta.loader === "neoforge" ? "NeoForge" : "Forge",
-        instanceLoader: instLoader === "quilt" ? "Quilt" : "Fabric",
-      };
-    }
-
-    if (isForgeFamily && (modMeta.loader === "fabric" || modMeta.loader === "quilt")) {
-      return {
-        incompatible: true,
-        reason: "loader-mismatch",
-        modLoader: modMeta.loader === "quilt" ? "Quilt" : "Fabric",
-        instanceLoader: instLoader === "neoforge" ? "NeoForge" : "Forge",
-      };
-    }
+  const supported = modMeta.supportedLoaders?.length ? modMeta.supportedLoaders : [modMeta.loader].filter(Boolean);
+  const compatibleLoader = supported.includes(instLoader) ||
+    (instLoader === "quilt" && supported.includes("fabric")) ||
+    (instLoader === "neoforge" && instVersion === "1.20.1" && supported.includes("forge"));
+  if (supported.length && instLoader && !compatibleLoader) {
+    return { incompatible: true, reason: "loader-mismatch", modLoader: ({ fabric: "Fabric", quilt: "Quilt", forge: "Forge", neoforge: "NeoForge" })[modMeta.loader] || modMeta.loader, instanceLoader: ({ fabric: "Fabric", quilt: "Quilt", forge: "Forge", neoforge: "NeoForge" })[instLoader] || instLoader };
   }
-
-  // 2. Check Minecraft Version Mismatch (major / minor comparison)
-  if (modMeta.mcVersionRange && instVersion) {
-    const range = String(modMeta.mcVersionRange).trim();
-    const rangeVersions = range.match(/\b1\.\d+(?:\.\d+)?\b/g);
-    if (rangeVersions && rangeVersions.length > 0) {
-      const instParts = instVersion.split(".").map(Number);
-      const instMinor = instParts[1];
-
-      const hasMatchingMinor = rangeVersions.some((v) => {
-        const parts = v.split(".").map(Number);
-        return parts[1] === instMinor;
-      });
-
-      if (!hasMatchingMinor && rangeVersions.length > 0) {
-        return {
-          incompatible: true,
-          reason: "version-mismatch",
-          modVersion: rangeVersions.join(", "),
-          instanceVersion: instVersion,
-        };
-      }
-    }
+  // Unsupported constraints are inconclusive and must never disable a mod.
+  if (modMeta.mcVersionRange && instVersion &&
+      !(supported.length > 1 && modMeta.loader !== instLoader) &&
+      satisfiesMinecraftVersion(instVersion, modMeta.mcVersionRange) === false) {
+    return {
+      incompatible: true,
+      reason: "version-mismatch",
+      modVersion: String(modMeta.mcVersionRange),
+      instanceVersion: instVersion,
+    };
   }
 
   return { incompatible: false };
+}
+
+function parseFabricRequirement(text) {
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/requires (any version|version ([0-9.]+)( or later)?) of (.+?), (which is missing|but only the wrong version)/i);
+    if (!match) continue;
+    const id = match[4].match(/\(([a-z0-9_.-]+)\)\s*$/i)?.[1] || match[4].match(/^(?:mod )?['"]?([a-z0-9_.-]+)['"]?$/i)?.[1];
+    if (!id) continue;
+    return { id: id.toLowerCase(), missing: /which is missing/i.test(match[5]), range: match[2] ? `${match[3] ? ">=" : "="}${match[2]}` : null };
+  }
+  return null;
 }
 
 /**
@@ -222,19 +217,20 @@ async function detectCrashAutoFix({
   crashReport = null,
   instancesRoot = null,
   systemTotalRamMb = null,
+  platform = process.platform,
 }) {
-  const text = String(logContent || "").slice(-500_000);
+  const text = currentLaunchLog(logContent).slice(-500_000);
   const crashText = crashReport ? `${crashReport.errorTitle || ""}\n${crashReport.stackTrace || ""}` : "";
   const combined = `${text}\n${crashText}`;
 
   // 1. Out of Memory Error (OOM)
   if (
-    /OutOfMemoryError|Java heap space|GC overhead limit exceeded|There is insufficient memory for the Java Runtime/i.test(combined)
+    /OutOfMemoryError:\s*(?:Java heap space|GC overhead limit exceeded)|Java heap space|GC overhead limit exceeded/i.test(combined)
   ) {
     const currentMemory = Number(instance.settings?.memory) || 4;
     const totalRamMb = systemTotalRamMb || Math.floor(os.totalmem() / (1024 * 1024));
     const totalSystemGb = Math.floor(totalRamMb / 1024);
-    const maxSafeGb = Math.max(4, totalSystemGb - 2);
+    const maxSafeGb = Math.max(0, totalSystemGb - 2);
 
     let targetGb = currentMemory + 2;
     if (currentMemory < 6 && maxSafeGb >= 6) {
@@ -272,33 +268,13 @@ async function detectCrashAutoFix({
   }
 
   // 3. Java Version Mismatch (UnsupportedClassVersionError)
-  const javaVersionMatch = combined.match(
-    /UnsupportedClassVersionError.*?has been compiled by a more recent version of the Java Runtime \(class file version (\d+)\.0\).*?recognizes class file versions up to (\d+)\.0/i,
-  );
-  if (javaVersionMatch || /class file version 65\.0/i.test(combined) || /class file version 61\.0/i.test(combined)) {
-    let targetMajor = 21;
-    if (javaVersionMatch && javaVersionMatch[1]) {
-      const classVersion = Number(javaVersionMatch[1]);
-      if (classVersion >= 65) targetMajor = 21;
-      else if (classVersion >= 61) targetMajor = 17;
-      else if (classVersion >= 60) targetMajor = 16;
-      else targetMajor = 8;
-    } else if (/class file version 65\.0/i.test(combined)) {
-      targetMajor = 21;
-    } else if (/class file version 61\.0/i.test(combined)) {
-      targetMajor = 17;
+  const javaVersionMatch = combined.match(/UnsupportedClassVersionError[\s\S]*?compiled[\s\S]*?class file version (\d+)\.\d+/i);
+  if (javaVersionMatch) {
+    const requiredMajor = Number(javaVersionMatch[1]) - 44;
+    if (requiredMajor >= 8 && requiredMajor <= 99) {
+      return { type: "switch-java", titleKey: "crash.autofix.switchJava.title", descKey: "crash.autofix.switchJava.desc", payload: { requiredJavaMajor: requiredMajor } };
     }
-
-    return {
-      type: "switch-java",
-      titleKey: "crash.autofix.switchJava.title",
-      descKey: "crash.autofix.switchJava.desc",
-      payload: {
-        requiredJavaMajor: targetMajor,
-      },
-    };
   }
-
   // Check for MC 1.20.5+ running on older Java (requires Java 21)
   const mcVersion = instance.version || instance.installProfile?.minecraftVersion || "";
   const isMc21Required = /^1\.(?:20\.[5-9]|2[1-9])/.test(mcVersion);
@@ -323,7 +299,7 @@ async function detectCrashAutoFix({
       type: "sanitize-jvm-gc-flags",
       titleKey: "crash.autofix.sanitizeGcFlags.title",
       descKey: "crash.autofix.sanitizeGcFlags.desc",
-      payload: {},
+      payload: { rejectedFlag: combined.match(/Unrecognized VM option ['"]([A-Za-z0-9]+)['"]/i)?.[1] || "UseConcMarkSweepGC" },
     };
   }
 
@@ -339,23 +315,50 @@ async function detectCrashAutoFix({
     };
   }
 
+  if (/servers\.dat[^\r\n]*(?:EOFException|ZipException|corrupt|failed|invalid)|Failed to load servers\s*:/i.test(combined)) {
+    return { type: "repair-servers-dat", titleKey: "crash.autofix.repairServersDat.title", descKey: "crash.autofix.repairServersDat.desc", payload: {} };
+  }
+  const cacheError = /JsonSyntaxException|MalformedJsonException|JsonParseException|EOFException|Failed to load user cache/i.test(combined);
+  if (cacheError && /usercache\.json|UserCache\.load|Failed to load user cache|realms_persistence\.json/i.test(combined)) {
+    const cacheFile = /realms_persistence\.json/i.test(combined) && !/usercache\.json|UserCache\.load|Failed to load user cache/i.test(combined)
+      ? "realms_persistence.json" : "usercache.json";
+    return { type: "clean-corrupted-usercache", titleKey: "crash.autofix.cleanUsercache.title", descKey: "crash.autofix.cleanUsercache.desc", payload: { cacheFile } };
+  }
+
   // 5. Corrupted Archive or ZIP Header detected in log
   if (
     /zip END header not found|invalid (?:LOC|CEN) header|zip file is empty|ZipException/i.test(combined)
   ) {
-    const jarMatch = combined.match(/([a-zA-Z0-9_\-+.]+\.jar)/i);
+    const errorLines = combined.split(/\r?\n/);
+    const errorIndex = errorLines.findIndex((line) => /zip END header not found|invalid (?:LOC|CEN) header|zip file is empty|ZipException/i.test(line));
+    const context = errorLines.slice(errorIndex, errorIndex + 8).join("\n");
+    const candidates = [...new Set([...context.matchAll(/(?:^|[\s/\\:])([a-zA-Z0-9_\-+.]+\.jar)\b/g)].map((match) => match[1]))];
+    if (candidates.length !== 1) return null;
+    const fileName = candidates[0];
+    if (instancesRoot && instance.id) {
+      const target = await optionalFile(instancesRoot, instance.id, path.join("mods", fileName));
+      if (!target) return null;
+      const meta = await inspectJarMetadata(target);
+      if (!meta.corrupted) return null;
+    }
     return {
       type: "clean-corrupted-file",
       titleKey: "crash.autofix.cleanCorruptFile.title",
       descKey: "crash.autofix.cleanCorruptFile.desc",
       payload: {
-        fileName: jarMatch ? jarMatch[1] : null,
+        fileName,
       },
     };
   }
 
+  const fabricRequirement = parseFabricRequirement(combined);
+  if (fabricRequirement && ["fabricloader", "quilt_loader", "neoforge", "forge"].includes(fabricRequirement.id)) {
+    const minimum = fabricRequirement.range?.match(/^(?:>=|=)([0-9]+(?:\.[0-9]+)+)$/)?.[1];
+    if (minimum) return { type: "upgrade-loader-version", titleKey: "crash.autofix.upgradeLoader.title", descKey: "crash.autofix.upgradeLoader.desc", payload: { loader: instance.loader, requiredVersion: minimum, currentVersion: instance.loaderVersion || "unknown" } };
+  }
   // 6. Missing Mod Dependency (Fabric API, Kotlin, Cloth Config, Architectury, etc.)
   const missingDepMatch =
+    (fabricRequirement?.missing ? [null, fabricRequirement.id] : null) ||
     combined.match(/(?:Mod\s+'[^']+'\s+)?requires\s*\{([a-z0-9_\-+.]+)(?:\s*@\s*[^}]+)?\},\s*which is missing/i) ||
     combined.match(/requires\s*\{([a-z0-9_\-+.]+)(?:\s*@\s*[^}]+)?\},\s*which is missing/i) ||
     combined.match(/Mod\s+'[^']+'\s+requires\s+([a-z0-9_\-+.]+),\s+which is missing/i) ||
@@ -384,6 +387,7 @@ async function detectCrashAutoFix({
           depId: rawDepId,
           projectId,
           depName,
+          ...(fabricRequirement?.range ? { versionRange: fabricRequirement.range } : {}),
         },
       };
     }
@@ -397,19 +401,25 @@ async function detectCrashAutoFix({
 
   if (isConfigCrash && instancesRoot && instance.id) {
     const instanceDir = path.join(instancesRoot, instance.id);
-    const configPathMatch =
-      combined.match(/config[\\/]([a-zA-Z0-9_\-+./]+\.(?:json5?|toml|ya?ml|cfg|ini))/i) ||
-      combined.match(/['"]([a-zA-Z0-9_\-+.]+\.(?:json5?|toml|ya?ml|cfg|ini))['"]/i);
+    const lines = combined.split(/\r?\n/);
+    const contexts = lines.flatMap((line, index) => /JsonSyntaxException|MalformedJsonException|ParsingException|ConfigException|Failed to load config|Error parsing config/i.test(line)
+      ? [lines.slice(index, index + 5).join("\n")] : []);
+    const paths = [...new Set(contexts.flatMap((context) => [...context.matchAll(/config[\\/]([^\r\n'"\s]+\.(?:json5?|toml|ya?ml|cfg|ini))/gi)].map((match) => match[1])))];
+    const configPathMatch = paths.length === 1 ? [null, paths[0]] : null;
 
     if (configPathMatch && configPathMatch[1]) {
-      const relConfig = configPathMatch[1].replace(/^[\\/]+/, "");
+      const relConfig = configPathMatch[1].replaceAll("\\", "/").replace(/^\/+/, "");
+      if (relConfig.split("/").includes("..")) return null;
       const candidatePaths = [
         path.join(instanceDir, "config", relConfig),
-        path.join(instanceDir, relConfig),
       ];
 
       for (const cand of candidatePaths) {
         if (fs.existsSync(cand)) {
+          if (cand.endsWith(".json")) {
+            try { JSON.parse(await fsp.readFile(cand, "utf8")); return null; }
+            catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+          }
           const relDisplay = path.relative(instanceDir, cand).replace(/\\/g, "/");
           return {
             type: "reset-corrupted-config",
@@ -480,9 +490,8 @@ async function detectCrashAutoFix({
         const files = await fsp.readdir(modsDir);
         const activeJars = files.filter((f) => f.endsWith(".jar") && !f.endsWith(".disabled"));
         const rawName = duplicateMatch[1].trim();
-        const baseName = rawName.replace(/\.jar$/, "").toLowerCase();
-
-        const matches = activeJars.filter((f) => f.toLowerCase().includes(baseName));
+        const inspected = await Promise.all(activeJars.map(async (file) => ({ file, metadata: await inspectJarMetadata(path.join(modsDir, file)) })));
+        const matches = inspected.filter(({ metadata }) => metadata.modId === rawName).map(({ file }) => file);
         if (matches.length >= 2) {
           const copyFile = matches.find((f) => /\(\d+\)|_copy|-copy/i.test(f));
           const disableFile = copyFile || matches[1];
@@ -632,7 +641,7 @@ async function detectCrashAutoFix({
   // 11. Culprit Mod from crash report
   if (crashReport && crashReport.suspectedCulprit) {
     const culprit = crashReport.suspectedCulprit;
-    if (!culprit.includes("onyx-fps-agent")) {
+    if (!culprit.includes("onyx-fps-agent") && culprit.endsWith(".jar") && path.basename(culprit) === culprit) {
       const finalName = culprit.endsWith(".jar") ? culprit : `${culprit}.jar`;
       return {
         type: "disable-culprit-mod",
@@ -647,7 +656,7 @@ async function detectCrashAutoFix({
   }
 
   // 12. disable-active-shaderpack
-  if (/Program link failed|Composite shader error|Failed to link program|ShaderCompileError|shader compilation|iris\.shaderpack/i.test(combined)) {
+  if (/Program link failed|Composite shader error|Failed to link program|ShaderCompileError|shader compilation (?:failed|error)/i.test(combined)) {
     return {
       type: "disable-active-shaderpack",
       titleKey: "crash.autofix.disableShaderpack.title",
@@ -671,23 +680,13 @@ async function detectCrashAutoFix({
   }
 
   // 13. apply-wayland-fix (check before generic OpenGL so Wayland GLX context crashes are correctly routed)
-  if (/GLFW error 65543|GLX: Failed to create context.*Wayland|wayland.*GLFW|GLFW_PLATFORM.*wayland/i.test(combined)) {
-    return {
-      type: "apply-wayland-fix",
-      titleKey: "crash.autofix.waylandFix.title",
-      descKey: "crash.autofix.waylandFix.desc",
-      payload: { jvmFlag: "-Dorg.lwjgl.glfw.libname=libglfw.so.3" },
-    };
+  if (platform === "linux" && /wayland/i.test(combined) && /GLFW|GLX|context/i.test(combined)) {
+    return null;
   }
 
   // 14. repair-opengl-context
   if (/GLFW error 65542|The driver does not appear to support OpenGL|Pixel format not accelerated|GLX: Failed to create context|WGL:.+OpenGL/i.test(combined)) {
-    return {
-      type: "repair-opengl-context",
-      titleKey: "crash.autofix.repairOpengl.title",
-      descKey: "crash.autofix.repairOpengl.desc",
-      payload: { jvmFlag: "-Dsun.java2d.opengl=false" },
-    };
+    return null;
   }
 
   // 15. reset-video-options
@@ -713,7 +712,8 @@ async function detectCrashAutoFix({
   // 17. upgrade-loader-version
   const loaderMatch = combined.match(/requires fabricloader >=([0-9.]+)|requires neoforge >=([0-9.]+)|requires quilt_loader >=([0-9.]+)|Mod requires loader version/i);
   if (loaderMatch) {
-    const requiredVersion = loaderMatch[1] || loaderMatch[2] || loaderMatch[3] || "unknown";
+    const requiredVersion = loaderMatch[1] || loaderMatch[2] || loaderMatch[3];
+    if (!requiredVersion) return null;
     return {
       type: "upgrade-loader-version",
       titleKey: "crash.autofix.upgradeLoader.title",
@@ -728,12 +728,7 @@ async function detectCrashAutoFix({
 
   // 18. switch-arm64-java
   if (process.platform === "darwin" && /UnsatisfiedLinkError.*incompatible architecture.*(?:have x86_64.*need arm64|have \(x86_64\))/i.test(combined)) {
-    return {
-      type: "switch-arm64-java",
-      titleKey: "crash.autofix.switchArm64.title",
-      descKey: "crash.autofix.switchArm64.desc",
-      payload: { targetArch: "arm64" },
-    };
+    return null;
   }
 
   // 19. inject-java-module-flags
@@ -748,27 +743,30 @@ async function detectCrashAutoFix({
 
   // 20. install-openjfx
   if (/NoClassDefFoundError.*javafx|ClassNotFoundException.*javafx|Missing JavaFX|javafx.*not found/i.test(combined)) {
-    return {
-      type: "install-openjfx",
-      titleKey: "crash.autofix.installJfx.title",
-      descKey: "crash.autofix.installJfx.desc",
-      payload: { requirement: "javafx" },
-    };
+    return null;
   }
 
   // 21. enable-forge-entity-removal
   if (/NullPointerException.*Ticking entity|Ticking block entity|ConcurrentModificationException.*entity|Erroring entity/i.test(combined)) {
-    return {
-      type: "enable-forge-entity-removal",
-      titleKey: "crash.autofix.entityRemoval.title",
-      descKey: "crash.autofix.entityRemoval.desc",
-      payload: { loader: instance.loader || "forge" },
-    };
+    const loader = String(instance.installProfile?.loader || instance.loader || "").split(/\s+/)[0].toLowerCase();
+    if (!["forge", "neoforge"].includes(loader) || !instancesRoot || !instance.id) return null;
+    const world = combined.match(/saves[\\/]([^\\/\r\n]+)[\\/]/)?.[1];
+    const candidates = ["config/forge.cfg", ...(world && ![".", ".."].includes(world) ? [`saves/${world}/serverconfig/${loader}-server.toml`] : [])];
+    for (const configFile of candidates) {
+      const target = await optionalFile(instancesRoot, instance.id, configFile);
+      if (!target) continue;
+      const content = await fsp.readFile(target, "utf8");
+      if (!/removeErroringEntities/.test(content) || !/removeErroringTileEntities/.test(content)) continue;
+      if (!/removeErroring(?:Tile)?Entities\s*=\s*false/i.test(content)) continue;
+      return { type: "enable-forge-entity-removal", titleKey: "crash.autofix.entityRemoval.title", descKey: "crash.autofix.entityRemoval.desc", payload: { loader, configFile } };
+    }
+    return null;
   }
 
   // 22. quarantine-playerdata
-  if (/Failed to load player data|Corrupt NBT tag|playerdata[\\/].*?\.dat.*?(?:corrupt|invalid|ClassCastException)/i.test(combined)) {
+  if (/Failed to load player data|playerdata[\\/].*?\.dat.*?(?:corrupt|invalid|ClassCastException)/i.test(combined)) {
     const uuidMatch = combined.match(/playerdata[\\/]([a-f0-9-]+)\.dat/i) || combined.match(/UUID\s+([a-f0-9-]+)/i);
+    if (!uuidMatch || !/^[a-f0-9-]{32,36}$/i.test(uuidMatch[1])) return null;
     return {
       type: "quarantine-playerdata",
       titleKey: "crash.autofix.quarantinePlayer.title",
@@ -779,23 +777,12 @@ async function detectCrashAutoFix({
 
   // 23. restore-world-snapshot
   if (/Already decorating|cascading worldgen|chunk generation crash|CrashedException.*worldgen|StackOverflowError.*(?:generate|decorator)/i.test(combined)) {
-    return {
-      type: "restore-world-snapshot",
-      titleKey: "crash.autofix.worldgenCrash.title",
-      descKey: "crash.autofix.worldgenCrash.desc",
-      payload: { worldgenIssue: true },
-    };
+    return null;
   }
 
   // 24. kill-zombie-process
   if (/FileAlreadyExistsException|AccessDeniedException.*session\.lock|AccessDeniedException.*latest\.log|EBUSY.*session\.lock|locked by another process/i.test(combined)) {
-    const lockFile = /session\.lock/i.test(combined) ? "session.lock" : "latest.log";
-    return {
-      type: "kill-zombie-process",
-      titleKey: "crash.autofix.zombieProcess.title",
-      descKey: "crash.autofix.zombieProcess.desc",
-      payload: { lockFile },
-    };
+    return null;
   }
 
   // 25. repair-instance-assets
@@ -820,43 +807,37 @@ async function detectCrashAutoFix({
 
   // 27. reconcile-modpack-manifest
   if (/modpack.*?incompatib|untracked mod|rogue mod|modpack update.*?conflict|modpack.*?version mismatch/i.test(combined)) {
-    return {
-      type: "reconcile-modpack-manifest",
-      titleKey: "crash.autofix.reconcileModpack.title",
-      descKey: "crash.autofix.reconcileModpack.desc",
-      payload: { advisory: true },
-    };
+    return null;
   }
 
   // 28. disable-environment-mismatched-mod
   if (/NoClassDefFoundError.*?net\/minecraft\/client\/Minecraft|Attempted to load class.*?net\/minecraft\/client.*?on a dedicated server|DedicatedServer.*?environment mismatch/i.test(combined)) {
-    return {
-      type: "disable-environment-mismatched-mod",
-      titleKey: "crash.autofix.envMismatch.title",
-      descKey: "crash.autofix.envMismatch.desc",
-      payload: { mod: "client-only-mod", environment: "server" },
-    };
+    return null;
   }
 
   // 29. restore-corrupted-level-dat
   if (/Failed to read level\.dat|EOFException.*level\.dat|CompressedStreamTools.*level\.dat|Corrupt level\.dat/i.test(combined)) {
-    const worldMatch = combined.match(/saves[\\/]([a-zA-Z0-9_\-+ ]+)[\\/]level\.dat/i) || combined.match(/world\s+['"]?([a-zA-Z0-9_\-+ ]+)['"]?/i);
+    const worldMatch = combined.match(/saves[\\/]([^\\/\r\n]+)[\\/]level\.dat/i);
+    if (!worldMatch) return null;
     return {
       type: "restore-corrupted-level-dat",
       titleKey: "crash.autofix.restoreLevelDat.title",
       descKey: "crash.autofix.restoreLevelDat.desc",
-      payload: { worldName: worldMatch ? worldMatch[1] : "world" },
+      payload: { worldName: worldMatch ? worldMatch[1].trim() : null },
     };
   }
 
   // 30. resolve-mixin-overwrite
   if (/MixinTransformerError.*Critical injection failure|Cannot apply @Overwrite on target|failed injection check.*mixins?\.json/i.test(combined)) {
     const mixinMatch = combined.match(/([a-zA-Z0-9_\-+.]+)\.mixins?\.json/i);
+    if (!mixinMatch || !instancesRoot || !instance.id) return null;
+    const owner = await findMixinOwner(instancesRoot, instance.id, mixinMatch[1]);
+    if (!owner) return null;
     return {
       type: "resolve-mixin-overwrite",
       titleKey: "crash.autofix.mixinOverwrite.title",
       descKey: "crash.autofix.mixinOverwrite.desc",
-      payload: { mixinName: mixinMatch ? mixinMatch[1] : "unknown" },
+      payload: { mixinName: mixinMatch[1], modFileName: owner },
     };
   }
 
@@ -871,7 +852,7 @@ async function detectCrashAutoFix({
   }
 
   // 32. install-optifabric (Fabric + OptiFine without OptiFabric)
-  const isFabric = (instance.loader || "").toLowerCase() === "fabric";
+  const isFabric = String(instance.installProfile?.loader || instance.loader || "").split(/\s+/)[0].toLowerCase() === "fabric";
   const hasOptifine = /optifine/i.test(combined);
   const lacksOptifabric = !/optifabric/i.test(combined);
   if (isFabric && hasOptifine && lacksOptifabric && (/LaunchClassLoader|OptiFine is not compatible directly/i.test(combined) || combined.includes("OptiFine"))) {
@@ -894,10 +875,11 @@ async function detectCrashAutoFix({
   }
 
   // 34. install-language-adapter
-  const adapterMatch = combined.match(/Language adapter '([a-zA-Z0-9_\-]+)' was not found|LanguageAdapterException/i);
+  const adapterMatch = combined.match(/Language adapter '([a-zA-Z0-9_\-]+)' was not found/i);
   if (adapterMatch) {
-    const rawAdapter = (adapterMatch[1] || "kotlin").toLowerCase();
-    const projectId = rawAdapter.includes("kotlin") ? "fabric-language-kotlin" : `language-adapter-${rawAdapter}`;
+    const rawAdapter = adapterMatch[1]?.toLowerCase();
+    if (!rawAdapter || !["kotlin", "fabric-language-kotlin"].includes(rawAdapter)) return null;
+    const projectId = "fabric-language-kotlin";
     return {
       type: "install-language-adapter",
       titleKey: "crash.autofix.installLangAdapter.title",
@@ -908,22 +890,12 @@ async function detectCrashAutoFix({
 
   // 35. suppress-gpu-hooks
   if (/# Problematic frame:.*(?:nvoglv64\.dll|atig6pxx\.dll|d3d11\.dll|RTSSHooks64\.dll|DiscordHook64\.dll)/i.test(combined) || /EXCEPTION_ACCESS_VIOLATION.*(?:nvoglv64|RTSSHooks)/i.test(combined)) {
-    return {
-      type: "suppress-gpu-hooks",
-      titleKey: "crash.autofix.suppressGpuHooks.title",
-      descKey: "crash.autofix.suppressGpuHooks.desc",
-      payload: { jvmFlag: "-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true" },
-    };
+    return null;
   }
 
   // 36. force-switch-64bit-java
   if (/Could not reserve enough space for \d+KB object heap|32-Bit Server VM|32-bit Java|x86 JRE/i.test(combined)) {
-    return {
-      type: "force-switch-64bit-java",
-      titleKey: "crash.autofix.forceSwitch64BitJava.title",
-      descKey: "crash.autofix.forceSwitch64BitJava.desc",
-      payload: { targetArch: "x64" },
-    };
+    return null;
   }
 
   // 37. install-qsl-library
@@ -956,33 +928,6 @@ async function detectCrashAutoFix({
     };
   }
 
-  // 40. clean-corrupted-usercache
-  if (
-    /(?:JsonSyntaxException|MalformedJsonException|JsonParseException).*?(?:usercache\.json|realms_persistence\.json)|Failed to load user cache: com\.google\.gson|Expected BEGIN_ARRAY but was STRING at path \$|java\.io\.EOFException: End of input at line 1 column 1 path \$(?:.*usercache)?/i.test(
-      combined,
-    )
-  ) {
-    return {
-      type: "clean-corrupted-usercache",
-      titleKey: "crash.autofix.cleanUsercache.title",
-      descKey: "crash.autofix.cleanUsercache.desc",
-      payload: {},
-    };
-  }
-
-  // 43. repair-servers-dat
-  if (
-    /net\.minecraft\.nbt\.ReportedNbtException: Loading NBT data|Failed to load servers: java\.io\.EOFException|java\.io\.EOFException\s+at net\.minecraft\.nbt\.NbtIo\.readCompressed|servers\.dat.*?(?:EOFException|ZipException|corrupt)/i.test(
-      combined,
-    )
-  ) {
-    return {
-      type: "repair-servers-dat",
-      titleKey: "crash.autofix.repairServersDat.title",
-      descKey: "crash.autofix.repairServersDat.desc",
-      payload: {},
-    };
-  }
 
   return null;
 }
@@ -990,13 +935,105 @@ async function detectCrashAutoFix({
 /**
  * Applies the proposed 1-click fix to the instance.
  */
-async function applyCrashAutoFix({
+async function scopedFile(instancesRoot, instanceId, relative) {
+  if (!instancesRoot || !/^[a-zA-Z0-9_-]{1,96}$/.test(String(instanceId))) throw new Error("Invalid instance path");
+  const root = await fsp.realpath(path.join(instancesRoot, instanceId));
+  const target = path.resolve(root, relative);
+  if (!target.startsWith(`${root}${path.sep}`)) throw new Error("Fix target is outside the instance");
+  const actual = await fsp.realpath(target);
+  if (!actual.startsWith(`${root}${path.sep}`)) throw new Error("Fix target is outside the instance");
+  if (!(await fsp.stat(actual)).isFile()) throw new Error("Fix target is not a file");
+  return actual;
+}
+
+async function findMixinOwner(instancesRoot, instanceId, name) {
+  const mods = path.join(instancesRoot, instanceId, "mods");
+  let files;
+  try { files = await fsp.readdir(mods); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  const owners = [];
+  for (const file of files.filter((item) => item.endsWith(".jar"))) {
+    const metadata = await inspectJarMetadata(path.join(mods, file));
+    if (metadata.mixinConfigs?.some((resource) => [`${name}.mixins.json`, `${name}.mixin.json`].includes(resource.replaceAll("\\", "/").split("/").at(-1)))) owners.push(file);
+  }
+  return owners.length === 1 ? owners[0] : null;
+}
+
+async function disableMod(instancesRoot, instanceId, fileName) {
+  if (typeof fileName !== "string" || path.basename(fileName) !== fileName || !fileName.endsWith(".jar")) throw new Error("An exact mod JAR is required");
+  const source = await scopedFile(instancesRoot, instanceId, path.join("mods", fileName));
+  const destination = `${source}.disabled`;
+  await fsp.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+  await fsp.unlink(source);
+}
+
+async function quarantineFile(instancesRoot, instanceId, relative) {
+  const source = await scopedFile(instancesRoot, instanceId, relative);
+  const destination = `${source}.quarantine-${crypto.randomUUID()}`;
+  await fsp.rename(source, destination);
+  return destination;
+}
+
+function unchanged(action, message = "No matching change was needed; the diagnosis was preserved") {
+  return { success: false, action, message };
+}
+
+async function optionalFile(instancesRoot, instanceId, relative) {
+  try { return await scopedFile(instancesRoot, instanceId, relative); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+}
+
+async function replaceWithBackup(target, contents) {
+  const backup = `${target}.backup-${crypto.randomUUID()}`;
+  const temporary = `${target}.fix-${crypto.randomUUID()}`;
+  await fsp.copyFile(target, backup, fs.constants.COPYFILE_EXCL);
+  try {
+    await fsp.writeFile(temporary, contents, { flag: "wx" });
+    await fsp.rename(temporary, target);
+  } finally {
+    await fsp.rm(temporary, { force: true });
+  }
+}
+
+async function editTextFile(instancesRoot, instanceId, relative, transform) {
+  const target = await optionalFile(instancesRoot, instanceId, relative);
+  if (!target) return false;
+  const before = await fsp.readFile(target, "utf8");
+  const after = transform(before);
+  if (before === after) return false;
+  await replaceWithBackup(target, after);
+  return true;
+}
+
+async function applyCrashAutoFix(options) {
+  if (!options.instance) throw new Error("Invalid fix action or instance");
+  const before = structuredClone(options.instance);
+  let saveRequested = false;
+  try {
+    const result = await applyCrashAutoFixAction({ ...options, saveStateFn: async () => { saveRequested = true; } });
+    if (!result.success) {
+      for (const key of Object.keys(options.instance)) delete options.instance[key];
+      Object.assign(options.instance, before);
+    }
+    if (result.success && saveRequested && options.saveStateFn) await options.saveStateFn();
+    return result;
+  } catch (error) {
+    for (const key of Object.keys(options.instance)) delete options.instance[key];
+    Object.assign(options.instance, before);
+    if (saveRequested && options.saveStateFn) await options.saveStateFn();
+    throw error;
+  }
+}
+
+async function applyCrashAutoFixAction({
   fixAction,
   instance,
   instancesRoot,
   installModFn = null,
   repairInstanceFn = null,
   saveStateFn = null,
+  resolveJavaFn = null,
+  repairNativesFn = null,
 }) {
   if (!fixAction || !fixAction.type || !instance) {
     throw new Error("Invalid fix action or instance");
@@ -1017,9 +1054,15 @@ async function applyCrashAutoFix({
     }
 
     case "switch-java": {
+      if (!resolveJavaFn) throw new Error("Java runtime resolver is unavailable");
+      const major = Number(fixAction.payload?.requiredJavaMajor);
+      if (!Number.isInteger(major) || major < 8 || major > 99) throw new Error("Invalid Java version");
+      const executable = await resolveJavaFn(major);
+      if (!executable) throw new Error("No compatible Java runtime found");
       instance.settings = instance.settings || {};
-      instance.settings.javaPath = "";
-      instance.javaMajor = fixAction.payload.requiredJavaMajor;
+      instance.settings.javaPath = executable;
+      instance.javaPath = executable;
+      instance.javaMajor = major;
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1051,21 +1094,15 @@ async function applyCrashAutoFix({
       let disabledFile = null;
       if (fs.existsSync(modsDir)) {
         const files = await fsp.readdir(modsDir);
-        const target = files.find((f) => {
-          if (f.endsWith(".disabled")) return false;
-          const cleanF = f.toLowerCase();
-          const cleanTarget = modName.toLowerCase().replace(/\.jar$/, "");
-          return cleanF === modName.toLowerCase() || cleanF.includes(cleanTarget);
-        });
+        const target = files.find((f) => f === modName && f.endsWith(".jar"));
 
         if (target) {
-          const src = path.join(modsDir, target);
-          const dst = path.join(modsDir, `${target}.disabled`);
-          await fsp.rename(src, dst);
+          await disableMod(instancesRoot, instance.id, target);
           disabledFile = target;
         }
       }
 
+      if (!disabledFile) throw new Error("The exact culprit mod was not found; select it manually");
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1078,28 +1115,23 @@ async function applyCrashAutoFix({
 
     case "clean-corrupted-file": {
       const fileName = fixAction.payload?.fileName;
-      if (fileName && instancesRoot) {
-        const modsDir = path.join(instancesRoot, instance.id, "mods");
-        const candidate = path.join(modsDir, fileName);
-        if (fs.existsSync(candidate)) {
-          await fsp.unlink(candidate);
-        }
-      }
-      if (repairInstanceFn) {
-        await repairInstanceFn(instance);
-      }
+      if (!fileName || path.basename(fileName) !== fileName || !fileName.endsWith(".jar")) throw new Error("An exact mod JAR is required");
+      const target = await scopedFile(instancesRoot, instance.id, path.join("mods", fileName));
+      if (!(await inspectJarMetadata(target)).corrupted) throw new Error("The selected mod archive is not corrupted");
+      await quarantineFile(instancesRoot, instance.id, path.join("mods", fileName));
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
       return {
         success: true,
         action: "clean-corrupted-file",
-        message: "Removed corrupted file and triggered repair",
+        message: "Quarantined the corrupted mod; reinstall it before launching",
       };
     }
 
     case "install-indium": {
-      if (installModFn) {
+      if (!installModFn) throw new Error("Mod installer is unavailable");
+      {
         await installModFn({
           instance,
           projectId: fixAction.payload?.projectId || "indium",
@@ -1116,10 +1148,12 @@ async function applyCrashAutoFix({
     }
 
     case "install-missing-dependency": {
-      if (installModFn) {
+      if (!installModFn) throw new Error("Mod installer is unavailable");
+      {
         await installModFn({
           instance,
           projectId: fixAction.payload?.projectId || fixAction.payload?.depId,
+          versionRange: fixAction.payload?.versionRange,
         });
       }
       instance.lastAutoFix = null;
@@ -1136,12 +1170,7 @@ async function applyCrashAutoFix({
       const disableFile = fixAction.payload?.disableFile;
       if (!disableFile) throw new Error("Duplicate mod file name missing");
 
-      const modsDir = path.join(instancesRoot, instance.id, "mods");
-      const src = path.join(modsDir, disableFile);
-      const dst = path.join(modsDir, `${disableFile}.disabled`);
-      if (fs.existsSync(src)) {
-        await fsp.rename(src, dst);
-      }
+      await disableMod(instancesRoot, instance.id, disableFile);
 
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
@@ -1157,12 +1186,7 @@ async function applyCrashAutoFix({
       const conflictingMod = fixAction.payload?.conflictingMod;
       if (!conflictingMod) throw new Error("Conflicting mod file name missing");
 
-      const modsDir = path.join(instancesRoot, instance.id, "mods");
-      const src = path.join(modsDir, conflictingMod);
-      const dst = path.join(modsDir, `${conflictingMod}.disabled`);
-      if (fs.existsSync(src)) {
-        await fsp.rename(src, dst);
-      }
+      await disableMod(instancesRoot, instance.id, conflictingMod);
 
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
@@ -1175,16 +1199,12 @@ async function applyCrashAutoFix({
     }
 
     case "reset-corrupted-config": {
-      const fullPath = fixAction.payload?.fullPath;
-      if (fullPath && fs.existsSync(fullPath)) {
-        const bakPath = `${fullPath}.bak`;
-        try {
-          await fsp.rename(fullPath, bakPath);
-        } catch {
-          await fsp.unlink(fullPath);
-        }
-      }
-
+      const relative = fixAction.payload?.configFile;
+      if (typeof relative !== "string" || !relative.replaceAll("\\", "/").startsWith("config/")) throw new Error("An exact instance config file is required");
+      const fullPath = await scopedFile(instancesRoot, instance.id, relative);
+      await fsp.copyFile(fullPath, `${fullPath}.backup-${crypto.randomUUID()}`, fs.constants.COPYFILE_EXCL);
+      const backupPath = fs.existsSync(`${fullPath}.bak`) ? `${fullPath}.bak-${crypto.randomUUID()}` : `${fullPath}.bak`;
+      await fsp.rename(fullPath, backupPath);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1196,29 +1216,13 @@ async function applyCrashAutoFix({
     }
 
     case "disable-active-shaderpack": {
-      const instanceDir = path.join(instancesRoot, instance.id);
-      const irisOptions = path.join(instanceDir, "optionsiris.txt");
-      if (fs.existsSync(irisOptions)) {
-        let content = await fsp.readFile(irisOptions, "utf8");
-        if (/^shaderPack=/m.test(content)) {
-          content = content.replace(/^shaderPack=.*$/m, "shaderPack=OFF");
-        } else {
-          content += "\nshaderPack=OFF\n";
-        }
-        await fsp.writeFile(irisOptions, content, "utf8");
-      } else {
-        await fsp.writeFile(irisOptions, "shaderPack=OFF\n", "utf8");
-      }
-
-      const optionsTxt = path.join(instanceDir, "options.txt");
-      if (fs.existsSync(optionsTxt)) {
-        let content = await fsp.readFile(optionsTxt, "utf8");
-        if (/^ofShader:/m.test(content)) {
-          content = content.replace(/^ofShader:.*$/m, "ofShader:OFF");
-          await fsp.writeFile(optionsTxt, content, "utf8");
-        }
-      }
-
+      const irisChanged = await editTextFile(instancesRoot, instance.id, "config/iris.properties", (content) =>
+        /^enableShaders\s*=/m.test(content)
+          ? content.replace(/^enableShaders\s*=.*$/m, "enableShaders=false")
+          : `${content}\nenableShaders=false\n`);
+      const optifineChanged = await editTextFile(instancesRoot, instance.id, "optionsshaders.txt", (content) =>
+        /^shaderPack\s*=/m.test(content) ? content.replace(/^shaderPack\s*=.*$/m, "shaderPack=OFF") : content);
+      if (!irisChanged && !optifineChanged) return unchanged(fixAction.type);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1230,48 +1234,15 @@ async function applyCrashAutoFix({
     }
 
     case "repair-opengl-context": {
-      instance.settings = instance.settings || {};
-      instance.settings.jvmArguments = instance.settings.jvmArguments || [];
-      if (!instance.settings.jvmArguments.includes(fixAction.payload.jvmFlag)) {
-        instance.settings.jvmArguments.push(fixAction.payload.jvmFlag);
-      }
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "repair-opengl-context",
-        message: "Added JVM argument to repair OpenGL context",
-      };
+      throw new Error("Review the graphics driver and overlay configuration manually; no automatic driver change was applied");
     }
 
     case "apply-wayland-fix": {
-      instance.settings = instance.settings || {};
-      instance.settings.jvmArguments = instance.settings.jvmArguments || [];
-      if (!instance.settings.jvmArguments.includes(fixAction.payload.jvmFlag)) {
-        instance.settings.jvmArguments.push(fixAction.payload.jvmFlag);
-      }
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "apply-wayland-fix",
-        message: "Applied Wayland GLFW fix",
-      };
+      throw new Error("Review the graphics driver and overlay configuration manually; no automatic driver change was applied");
     }
 
     case "reset-video-options": {
-      const instanceDir = path.join(instancesRoot, instance.id);
-      const optionsTxt = path.join(instanceDir, "options.txt");
-      if (fs.existsSync(optionsTxt)) {
-        let content = await fsp.readFile(optionsTxt, "utf8");
-        content = content.replace(/^fullscreen:.*$/m, "fullscreen:false");
-        content = content.replace(/^overrideWidth:.*$/m, "overrideWidth:854");
-        content = content.replace(/^overrideHeight:.*$/m, "overrideHeight:480");
-        content = content.replace(/^guiScale:.*$/m, "guiScale:0");
-        await fsp.writeFile(optionsTxt, content, "utf8");
-      }
+      if (!await editTextFile(instancesRoot, instance.id, "options.txt", (content) => content.replace(/^fullscreen:.*$/m, "fullscreen:false").replace(/^overrideWidth:.*$/m, "overrideWidth:854").replace(/^overrideHeight:.*$/m, "overrideHeight:480").replace(/^guiScale:.*$/m, "guiScale:0"))) return unchanged(fixAction.type);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1283,13 +1254,7 @@ async function applyCrashAutoFix({
     }
 
     case "disable-active-resourcepacks": {
-      const instanceDir = path.join(instancesRoot, instance.id);
-      const optionsTxt = path.join(instanceDir, "options.txt");
-      if (fs.existsSync(optionsTxt)) {
-        let content = await fsp.readFile(optionsTxt, "utf8");
-        content = content.replace(/^resourcePacks:.*$/m, "resourcePacks:[]");
-        await fsp.writeFile(optionsTxt, content, "utf8");
-      }
+      if (!await editTextFile(instancesRoot, instance.id, "options.txt", (content) => content.replace(/^resourcePacks:.*$/m, "resourcePacks:[]"))) return unchanged(fixAction.type);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1301,30 +1266,36 @@ async function applyCrashAutoFix({
     }
 
     case "upgrade-loader-version": {
-      instance.settings = instance.settings || {};
-      instance.settings.pendingLoaderUpgrade = true;
+      if (!repairInstanceFn) throw new Error("Loader installer is unavailable");
+      const version = fixAction.payload?.requiredVersion;
+      if (typeof version !== "string" || !/^[0-9]+(?:\.[0-9]+)+(?:[-+][a-zA-Z0-9.-]+)?$/.test(version)) throw new Error("An exact loader version is required");
+      const previous = structuredClone(instance);
+      const loader = String(instance.installProfile?.loader || instance.loader || "").split(/\s+/)[0].toLowerCase();
+      if (!["fabric", "quilt", "forge", "neoforge"].includes(loader)) throw new Error("Unsupported loader");
+      instance.loaderVersion = version;
+      instance.installProfile = { minecraftVersion: instance.version, loader, loaderVersion: version };
+      instance.resolvedVersionId = null;
+      try {
+        await repairInstanceFn(instance);
+        if (!instance.resolvedVersionId || !instance.resolvedVersionId.includes(version)) throw new Error("Loader installation was not verified");
+      } catch (error) {
+        for (const key of Object.keys(instance)) delete instance[key];
+        Object.assign(instance, previous);
+        if (saveStateFn) await saveStateFn();
+        throw error;
+      }
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
       return {
         success: true,
         action: "upgrade-loader-version",
-        message: "Flagged instance for loader upgrade",
+        message: `Installed loader ${version}`,
       };
     }
 
     case "switch-arm64-java": {
-      instance.settings = instance.settings || {};
-      instance.settings.javaPath = "";
-      instance.javaArch = "arm64";
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "switch-arm64-java",
-        message: "Switched to ARM64 Java architecture",
-      };
+      throw new Error("This runtime change requires manual Java configuration; no automatic change was applied");
     }
 
     case "inject-java-module-flags": {
@@ -1334,32 +1305,13 @@ async function applyCrashAutoFix({
         "--add-opens=java.base/java.lang=ALL-UNNAMED",
         "--add-opens=java.base/java.io=ALL-UNNAMED",
         "--add-opens=java.base/java.nio=ALL-UNNAMED",
-        "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+        "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
       ];
-      // Note: replaced the string `--add-opens java.base/java.lang=ALL-UNNAMED` with '=' notation to avoid splitting issues if it's in an array, 
-      // but let's actually stick exactly to the prompt request which said:
-      // `--add-opens java.base/java.lang=ALL-UNNAMED` etc. I'll split them or use the space. The prompt said to add those literal flags. Wait, I'll use exactly what prompt requested.
-      
-      const reqFlags = [
-        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
-        "--add-opens", "java.base/java.io=ALL-UNNAMED",
-        "--add-opens", "java.base/java.nio=ALL-UNNAMED",
-        "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED"
-      ];
-      // actually let's just add the requested strings: `--add-opens java.base/java.lang=ALL-UNNAMED` is what it asked.
-      
-      const exactFlags = [
-        "--add-opens java.base/java.lang=ALL-UNNAMED",
-        "--add-opens java.base/java.io=ALL-UNNAMED",
-        "--add-opens java.base/java.nio=ALL-UNNAMED",
-        "--add-opens java.base/sun.nio.ch=ALL-UNNAMED"
-      ];
-      
-      for (const flag of exactFlags) {
-        if (!instance.settings.jvmArguments.includes(flag)) {
-          instance.settings.jvmArguments.push(flag);
-        }
-      }
+      const beforeArgs = instance.settings.jvmArguments;
+      const existing = beforeArgs.map((flag) => flag.replace(/^--add-opens\s+/, "--add-opens="));
+      const next = [...new Set([...flags, ...existing])].slice(0, 24);
+      if (JSON.stringify(next) === JSON.stringify(beforeArgs)) return unchanged(fixAction.type);
+      instance.settings.jvmArguments = next;
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1371,47 +1323,15 @@ async function applyCrashAutoFix({
     }
 
     case "install-openjfx": {
-      instance.settings = instance.settings || {};
-      instance.settings.jvmArguments = instance.settings.jvmArguments || [];
-      const flag = "--add-modules javafx.controls,javafx.fxml";
-      if (!instance.settings.jvmArguments.includes(flag)) {
-        instance.settings.jvmArguments.push(flag);
-      }
-      instance.settings.requiresJavaFX = true;
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "install-openjfx",
-        message: "Added JavaFX requirement and modules",
-      };
+      throw new Error("This runtime change requires manual Java configuration; no automatic change was applied");
     }
 
     case "enable-forge-entity-removal": {
-      const configDir = path.join(instancesRoot, instance.id, "config");
-      await fsp.mkdir(configDir, { recursive: true }).catch(() => {});
-      const tomlFile = path.join(configDir, "forge-common.toml");
-      const cfgFile = path.join(configDir, "forge.cfg");
-
-      if (fs.existsSync(cfgFile)) {
-        let content = await fsp.readFile(cfgFile, "utf8");
-        content = content.replace(/^(\s*B:removeErroringEntities=).*$/m, "$1true");
-        content = content.replace(/^(\s*B:removeErroringTileEntities=).*$/m, "$1true");
-        if (!/removeErroringEntities/.test(content)) {
-          content += "\nB:removeErroringEntities=true\nB:removeErroringTileEntities=true\n";
-        }
-        await fsp.writeFile(cfgFile, content, "utf8");
-      } else {
-        let content = fs.existsSync(tomlFile) ? await fsp.readFile(tomlFile, "utf8") : "";
-        content = content.replace(/^(\s*removeErroringEntities\s*=).*$/m, "$1 true");
-        content = content.replace(/^(\s*removeErroringTileEntities\s*=).*$/m, "$1 true");
-        if (!/removeErroringEntities/.test(content)) {
-          content += "\nremoveErroringEntities = true\nremoveErroringTileEntities = true\n";
-        }
-        await fsp.writeFile(tomlFile, content, "utf8");
-      }
-
+      const relative = fixAction.payload?.configFile;
+      if (typeof relative !== "string" || !/^(?:config\/forge\.cfg|saves\/[^/]+\/serverconfig\/(?:forge|neoforge)-server\.toml)$/.test(relative)) throw new Error("An exact supported Forge config is required");
+      const changed = await editTextFile(instancesRoot, instance.id, relative, (content) =>
+        content.replace(/^(\s*(?:B:)?removeErroring(?:Tile)?Entities\s*=\s*)false\s*$/gmi, "$1true"));
+      if (!changed) return unchanged(fixAction.type);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1424,26 +1344,28 @@ async function applyCrashAutoFix({
 
     case "quarantine-playerdata": {
       const uuid = fixAction.payload?.uuid;
+      if (typeof uuid !== "string" || !/^[a-f0-9-]{32,36}$/i.test(uuid)) throw new Error("An exact player UUID is required");
       const savesDir = path.join(instancesRoot, instance.id, "saves");
-      let quarantined = false;
-      if (uuid && fs.existsSync(savesDir)) {
-        const worlds = await fsp.readdir(savesDir).catch(() => []);
-        for (const w of worlds) {
-          const pdDir = path.join(savesDir, w, "playerdata");
-          const target = path.join(pdDir, `${uuid}.dat`);
-          if (fs.existsSync(target)) {
-            await fsp.rename(target, `${target}.bak`).catch(() => {});
-            quarantined = true;
-          }
-        }
+      const worldName = fixAction.payload?.worldName;
+      const worlds = await fsp.readdir(savesDir);
+      const candidates = [];
+      for (const world of worlds) {
+        if (worldName && world !== worldName) continue;
+        const relative = path.join("saves", world, "playerdata", `${uuid}.dat`);
+        try { candidates.push(await scopedFile(instancesRoot, instance.id, relative)); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
       }
+      if (candidates.length !== 1) throw new Error("Select the affected world before quarantining player data");
+      const target = candidates[0];
+      await fsp.copyFile(target, `${target}.backup-${crypto.randomUUID()}`, fs.constants.COPYFILE_EXCL);
+      await fsp.rename(target, `${target}.bak`);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
       return {
         success: true,
         action: "quarantine-playerdata",
-        message: quarantined ? `Quarantined player data for ${uuid}` : "Backed up player data",
+        message: `Quarantined player data for ${uuid}`,
       };
     }
 
@@ -1452,10 +1374,7 @@ async function applyCrashAutoFix({
       const modsDir = path.join(instancesRoot, instance.id, "mods");
       let removed = false;
       if (fileName && fs.existsSync(path.join(modsDir, fileName))) {
-        const targetPath = path.join(modsDir, fileName);
-        await fsp.rename(targetPath, `${targetPath}.disabled`).catch(async () => {
-          await fsp.unlink(targetPath).catch(() => {});
-        });
+        await disableMod(instancesRoot, instance.id, fileName);
         removed = true;
       } else if (fs.existsSync(modsDir)) {
         const files = await fsp.readdir(modsDir).catch(() => []);
@@ -1468,10 +1387,7 @@ async function applyCrashAutoFix({
              /^client\.jar$/i.test(f) ||
              /^server\.jar$/i.test(f))
           ) {
-            const targetPath = path.join(modsDir, f);
-            await fsp.rename(targetPath, `${targetPath}.disabled`).catch(async () => {
-              await fsp.unlink(targetPath).catch(() => {});
-            });
+            await disableMod(instancesRoot, instance.id, f);
             removed = true;
           }
         }
@@ -1489,44 +1405,11 @@ async function applyCrashAutoFix({
     }
 
     case "restore-world-snapshot": {
-      instance.settings = instance.settings || {};
-      instance.settings.worldgenCrashDetected = true;
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "restore-world-snapshot",
-        message: "Flagged worldgen crash for backup recovery",
-      };
+      throw new Error("Select a specific world snapshot in diagnostics to restore it");
     }
 
     case "kill-zombie-process": {
-      const instanceDir = path.join(instancesRoot, instance.id);
-      const rootLock = path.join(instanceDir, "session.lock");
-      if (fs.existsSync(rootLock)) {
-        await fsp.unlink(rootLock).catch(() => {});
-      }
-      const savesDir = path.join(instanceDir, "saves");
-      if (fs.existsSync(savesDir)) {
-        const worlds = await fsp.readdir(savesDir).catch(() => []);
-        for (const w of worlds) {
-          const sLock = path.join(savesDir, w, "session.lock");
-          if (fs.existsSync(sLock)) {
-            await fsp.unlink(sLock).catch(() => {});
-          }
-        }
-      }
-      instance.settings = instance.settings || {};
-      instance.settings.zombieProcessDetected = true;
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "kill-zombie-process",
-        message: "Cleared orphan session lock files",
-      };
+      throw new Error("Close the process holding the world lock; automatic lock deletion is disabled");
     }
 
     case "repair-instance-assets": {
@@ -1550,11 +1433,12 @@ async function applyCrashAutoFix({
         const files = await fsp.readdir(modsDir).catch(() => []);
         for (const f of files) {
           if (/\.(?:tmp|part|scope-download|download)$/i.test(f) || /\.jar\.tmp$/i.test(f)) {
-            await fsp.unlink(path.join(modsDir, f)).catch(() => {});
+            await fsp.unlink(await scopedFile(instancesRoot, instance.id, path.join("mods", f)));
             count++;
           }
         }
       }
+      if (!count) return unchanged(fixAction.type);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1566,57 +1450,28 @@ async function applyCrashAutoFix({
     }
 
     case "reconcile-modpack-manifest": {
-      instance.settings = instance.settings || {};
-      instance.settings.modpackReconcileNeeded = true;
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "reconcile-modpack-manifest",
-        message: "Flagged modpack for manifest reconciliation",
-      };
+      throw new Error("Review the modpack update preview before reconciling files");
     }
 
     case "disable-environment-mismatched-mod": {
-      const modName = fixAction.payload?.modFileName || fixAction.payload?.mod;
-      if (modName && modName !== "client-only-mod") {
-        const modsDir = path.join(instancesRoot, instance.id, "mods");
-        if (fs.existsSync(modsDir)) {
-          const files = await fsp.readdir(modsDir).catch(() => []);
-          const target = files.find((f) => f.toLowerCase() === modName.toLowerCase());
-          if (target) {
-            await fsp.rename(path.join(modsDir, target), path.join(modsDir, `${target}.disabled`)).catch(() => {});
-          }
-        }
-      }
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "disable-environment-mismatched-mod",
-        message: "Disabled environment mismatched mod",
-      };
+      throw new Error("Identify the exact incompatible mod in diagnostics before disabling it");
     }
 
     case "restore-corrupted-level-dat": {
-      const savesDir = path.join(instancesRoot, instance.id, "saves");
-      let restored = false;
-      if (fs.existsSync(savesDir)) {
-        const worlds = await fsp.readdir(savesDir).catch(() => []);
-        for (const w of worlds) {
-          const wDir = path.join(savesDir, w);
-          const lvlDat = path.join(wDir, "level.dat");
-          const lvlOld = path.join(wDir, "level.dat_old");
-          if (fs.existsSync(lvlOld)) {
-            if (fs.existsSync(lvlDat)) {
-              await fsp.rename(lvlDat, `${lvlDat}.corrupt`).catch(() => {});
-            }
-            await fsp.copyFile(lvlOld, lvlDat).catch(() => {});
-            restored = true;
-          }
-        }
+      const worldName = fixAction.payload?.worldName;
+      if (typeof worldName !== "string" || !worldName.trim() || worldName === "." || worldName === ".." || /[\\/]/.test(worldName)) throw new Error("An exact world name is required");
+      const relative = path.join("saves", worldName, "level.dat");
+      const backup = await scopedFile(instancesRoot, instance.id, `${relative}_old`);
+      if (!(await fsp.stat(backup)).size) throw new Error("The world backup is empty");
+      const target = await scopedFile(instancesRoot, instance.id, relative);
+      const preserved = `${target}.corrupt-${crypto.randomUUID()}`;
+      await fsp.copyFile(target, preserved, fs.constants.COPYFILE_EXCL);
+      const temporary = `${target}.restore-${crypto.randomUUID()}`;
+      try {
+        await fsp.copyFile(backup, temporary, fs.constants.COPYFILE_EXCL);
+        await fsp.rename(temporary, target);
+      } finally {
+        await fsp.rm(temporary, { force: true });
       }
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
@@ -1624,44 +1479,27 @@ async function applyCrashAutoFix({
       return {
         success: true,
         action: "restore-corrupted-level-dat",
-        message: restored ? "Restored level.dat from level.dat_old" : "No level.dat_old backup found to restore",
+        message: `Restored level.dat for ${worldName} from level.dat_old`,
       };
     }
 
     case "resolve-mixin-overwrite": {
       const mixinName = fixAction.payload?.mixinName;
-      let disabledFile = null;
-      if (mixinName && instancesRoot) {
-        const modsDir = path.join(instancesRoot, instance.id, "mods");
-        if (fs.existsSync(modsDir)) {
-          const files = await fsp.readdir(modsDir).catch(() => []);
-          const activeJars = files.filter((f) => f.endsWith(".jar") && !f.endsWith(".disabled"));
-          const target = activeJars.find((f) => f.toLowerCase().includes(mixinName.toLowerCase().replace(/[^a-z0-9]/g, "")));
-          if (target) {
-            await fsp.rename(path.join(modsDir, target), path.join(modsDir, `${target}.disabled`)).catch(() => {});
-            disabledFile = target;
-          }
-        }
-      }
+      const target = fixAction.payload?.modFileName;
+      if (!mixinName || !target || await findMixinOwner(instancesRoot, instance.id, mixinName) !== target) throw new Error("The exact mod for this mixin could not be identified");
+      await disableMod(instancesRoot, instance.id, target);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
       return {
         success: true,
         action: "resolve-mixin-overwrite",
-        message: disabledFile ? `Disabled conflicting mod ${disabledFile}` : `Flagged mixin conflict for ${mixinName}`,
+        message: `Disabled conflicting mod ${target}`,
       };
     }
 
     case "sanitize-options-txt": {
-      const optionsTxt = path.join(instancesRoot, instance.id, "options.txt");
-      if (fs.existsSync(optionsTxt)) {
-        let content = await fsp.readFile(optionsTxt, "utf8");
-        content = content.replace(/^gamma:.*NaN.*$/m, "gamma:1.0");
-        content = content.replace(/^fov:.*NaN.*$/m, "fov:70.0");
-        content = content.replace(/^gamma:\s*$/m, "gamma:1.0");
-        await fsp.writeFile(optionsTxt, content, "utf8");
-      }
+      if (!await editTextFile(instancesRoot, instance.id, "options.txt", (content) => content.replace(/^gamma:.*NaN.*$/m, "gamma:1.0").replace(/^fov:.*NaN.*$/m, "fov:70.0").replace(/^gamma:\s*$/m, "gamma:1.0"))) return unchanged(fixAction.type);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1673,7 +1511,8 @@ async function applyCrashAutoFix({
     }
 
     case "install-optifabric": {
-      if (installModFn) {
+      if (!installModFn) throw new Error("Mod installer is unavailable");
+      {
         await installModFn({
           instance,
           projectId: "optifabric",
@@ -1696,11 +1535,12 @@ async function applyCrashAutoFix({
         const files = await fsp.readdir(logsDir).catch(() => []);
         for (const f of files) {
           if (f.endsWith(".log.gz") || f.endsWith(".tmp")) {
-            await fsp.unlink(path.join(logsDir, f)).catch(() => {});
+            await fsp.unlink(await scopedFile(instancesRoot, instance.id, path.join("logs", f)));
             count++;
           }
         }
       }
+      if (!count) return unchanged(fixAction.type);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
@@ -1712,7 +1552,8 @@ async function applyCrashAutoFix({
     }
 
     case "install-language-adapter": {
-      if (installModFn) {
+      if (!installModFn) throw new Error("Mod installer is unavailable");
+      {
         await installModFn({
           instance,
           projectId: fixAction.payload?.projectId || "fabric-language-kotlin",
@@ -1729,38 +1570,16 @@ async function applyCrashAutoFix({
     }
 
     case "suppress-gpu-hooks": {
-      instance.settings = instance.settings || {};
-      instance.settings.jvmArguments = instance.settings.jvmArguments || [];
-      const flag = fixAction.payload?.jvmFlag || "-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true";
-      if (!instance.settings.jvmArguments.includes(flag)) {
-        instance.settings.jvmArguments.push(flag);
-      }
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "suppress-gpu-hooks",
-        message: "Injected safe GPU compatibility argument",
-      };
+      throw new Error("Review the graphics driver and overlay configuration manually; no automatic driver change was applied");
     }
 
     case "force-switch-64bit-java": {
-      instance.settings = instance.settings || {};
-      instance.settings.javaPath = "";
-      instance.javaArch = "x64";
-      instance.lastAutoFix = null;
-      instance.lastDiagnosis = null;
-      if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "force-switch-64bit-java",
-        message: "Switched to managed 64-bit Java runtime",
-      };
+      throw new Error("This runtime change requires manual Java configuration; no automatic change was applied");
     }
 
     case "install-qsl-library": {
-      if (installModFn) {
+      if (!installModFn) throw new Error("Mod installer is unavailable");
+      {
         await installModFn({
           instance,
           projectId: "qsl",
@@ -1777,17 +1596,15 @@ async function applyCrashAutoFix({
     }
 
     case "purge-corrupted-natives": {
-      const nativesDir = path.join(instancesRoot, instance.id, "natives");
-      if (fs.existsSync(nativesDir)) {
-        await fsp.rm(nativesDir, { recursive: true, force: true }).catch(() => {});
-      }
+      if (!repairNativesFn) throw new Error("Native library repair is unavailable");
+      await repairNativesFn(instance);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
       return {
         success: true,
         action: "purge-corrupted-natives",
-        message: "Purged natives directory to force clean re-extraction",
+        message: "Rebuilt native libraries for the resolved game version",
       };
     }
 
@@ -1809,24 +1626,25 @@ async function applyCrashAutoFix({
     }
 
     case "clean-corrupted-usercache": {
-      const instDir = path.join(instancesRoot, instance.id);
-      const uc = path.join(instDir, "usercache.json");
-      const rp = path.join(instDir, "realms_persistence.json");
-      if (fs.existsSync(uc)) {
-        await fsp.unlink(uc).catch(async () => {
-          await fsp.rename(uc, `${uc}.corrupt`).catch(() => {});
-        });
-      }
-      if (fs.existsSync(rp)) {
-        await fsp.unlink(rp).catch(() => {});
-      }
+      const relative = fixAction.payload?.cacheFile;
+      if (!["usercache.json", "realms_persistence.json"].includes(relative)) throw new Error("An exact cache file is required");
+      const target = await optionalFile(instancesRoot, instance.id, relative);
+      if (!target) return unchanged(fixAction.type);
+      const contents = await fsp.readFile(target, "utf8");
+      let valid = false;
+      try {
+        const parsed = JSON.parse(contents);
+        valid = relative === "usercache.json" ? Array.isArray(parsed) : Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+      } catch { /* Malformed JSON is the evidence for quarantining this cache. */ }
+      if (valid) return unchanged(fixAction.type, "The selected cache is valid; it was preserved");
+      await quarantineFile(instancesRoot, instance.id, relative);
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
       return {
         success: true,
         action: "clean-corrupted-usercache",
-        message: "Reset corrupted usercache and realms persistence data",
+        message: `Quarantined ${relative}; other caches were preserved`,
       };
     }
 
@@ -1835,19 +1653,19 @@ async function applyCrashAutoFix({
       let args = Array.isArray(instance.settings.jvmArguments)
         ? [...instance.settings.jvmArguments]
         : [];
-      const isModernJava = instance.javaMajor
-        ? instance.javaMajor >= 14
-        : !/^1\.(?:[1-9]|1[0-6])(?:\.|$)/.test(instance.version || "");
-      if (isModernJava) {
-        args = args.filter(
-          (a) => !/^-XX:\+(?:UseConcMarkSweepGC|CMSIncrementalMode|CMSIncrementalPacing|UseParNewGC)$/i.test(a.trim()),
-        );
-        if (!args.some((a) => /^-XX:\+Use[A-Za-z0-9]+GC$/i.test(a.trim()))) {
-          args.push("-XX:+UseG1GC");
-        }
-      } else {
-        args = args.filter((a) => !/^-XX:\+(?:UseZGC|UseShenandoahGC)$/i.test(a.trim()));
-      }
+      const rejected = fixAction.payload?.rejectedFlag;
+      const knownGcOptions = new Set(["UseConcMarkSweepGC", "CMSIncrementalMode", "CMSIncrementalPacing", "UseParNewGC", "UseZGC", "UseShenandoahGC"]);
+      const major = instance.javaMajor || (/^1\.(?:[1-9]|1[0-6])(?:\.|$)/.test(instance.version || "") ? 8 : 17);
+      const beforeArgs = [...args];
+      args = args.filter((argument) => {
+        const name = argument.match(/^-XX:[+-]([A-Za-z0-9]+)$/)?.[1];
+        if (name && name === rejected && knownGcOptions.has(name)) return false;
+        if (major >= 14 && ["UseConcMarkSweepGC", "CMSIncrementalMode", "CMSIncrementalPacing", "UseParNewGC"].includes(name)) return false;
+        if (major < 11 && ["UseZGC", "UseShenandoahGC"].includes(name)) return false;
+        return true;
+      });
+      if (JSON.stringify(args) === JSON.stringify(beforeArgs)) return unchanged(fixAction.type);
+      if (!args.some((argument) => /^-XX:\+Use[A-Za-z0-9]+GC$/.test(argument))) args.push("-XX:+UseG1GC");
       instance.settings.jvmArguments = args;
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
@@ -1879,35 +1697,27 @@ async function applyCrashAutoFix({
     }
 
     case "repair-servers-dat": {
-      const instDir = path.join(instancesRoot, instance.id);
-      const sDat = path.join(instDir, "servers.dat");
-      const sOld = path.join(instDir, "servers.dat_old");
+      const target = await optionalFile(instancesRoot, instance.id, "servers.dat");
+      if (!target) return unchanged(fixAction.type);
+      const backup = await optionalFile(instancesRoot, instance.id, "servers.dat_old");
       let restored = false;
-      if (fs.existsSync(sOld)) {
-        const oldStat = await fsp.stat(sOld).catch(() => null);
-        if (oldStat && oldStat.size > 0) {
-          if (fs.existsSync(sDat)) {
-            await fsp.rename(sDat, `${sDat}.corrupt`).catch(() => {});
-          }
-          await fsp.copyFile(sOld, sDat).catch(() => {});
+      if (backup && (await fsp.stat(backup)).size > 0) {
+        const temporary = `${target}.fix-${crypto.randomUUID()}`;
+        await fsp.copyFile(target, `${target}.backup-${crypto.randomUUID()}`, fs.constants.COPYFILE_EXCL);
+        try {
+          await fsp.copyFile(backup, temporary, fs.constants.COPYFILE_EXCL);
+          await fsp.rename(temporary, target);
           restored = true;
+        } finally {
+          await fsp.rm(temporary, { force: true });
         }
-      }
-      if (!restored && fs.existsSync(sDat)) {
-        await fsp.unlink(sDat).catch(async () => {
-          await fsp.rename(sDat, `${sDat}.corrupt`).catch(() => {});
-        });
+      } else {
+        await quarantineFile(instancesRoot, instance.id, "servers.dat");
       }
       instance.lastAutoFix = null;
       instance.lastDiagnosis = null;
       if (saveStateFn) await saveStateFn();
-      return {
-        success: true,
-        action: "repair-servers-dat",
-        message: restored
-          ? "Restored servers.dat from servers.dat_old backup"
-          : "Reset corrupted servers.dat to allow clean regeneration",
-      };
+      return { success: true, action: fixAction.type, message: restored ? "Restored servers.dat from its backup" : "Quarantined servers.dat for clean regeneration" };
     }
 
     default:

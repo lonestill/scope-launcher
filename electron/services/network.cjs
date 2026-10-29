@@ -333,6 +333,10 @@ function calculateEta(total, received, speed) {
 }
 
 async function downloadMany(items, options = {}) {
+  options.signal?.throwIfAborted();
+  const controller = new AbortController();
+  const abort = () => controller.abort(options.signal?.reason);
+  options.signal?.addEventListener("abort", abort, { once: true });
   const concurrency = Math.max(1, Math.min(options.concurrency || 8, 16));
   const knownTotalBytes = items.reduce((sum, item) => {
     const s = Number(item.size);
@@ -406,7 +410,7 @@ async function downloadMany(items, options = {}) {
       const item = items[index];
       await downloadFile({
         ...item,
-        signal: options.signal,
+        signal: controller.signal,
         onProgress: (progress) => report(item, progress),
       });
       const finalItemBytes = inFlight.get(item.destination) || Number(item.size) || 0;
@@ -417,9 +421,18 @@ async function downloadMany(items, options = {}) {
     }
   };
 
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length || 1) }, worker),
-  );
+  let failure;
+  try {
+    await Promise.allSettled(
+      Array.from({ length: Math.min(concurrency, items.length || 1) }, async () => {
+        try { await worker(); }
+        catch (error) { failure ||= error; controller.abort(error); }
+      }),
+    );
+    if (failure) throw failure;
+  } finally {
+    options.signal?.removeEventListener("abort", abort);
+  }
   emitProgress(null, true);
 }
 

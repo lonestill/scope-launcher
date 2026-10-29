@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useState, useEffect, useCallback } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -71,6 +72,8 @@ export function CreatePartyModal({
   isExistingRoom = false,
 }: CreatePartyModalProps) {
   const { t } = useI18n();
+  const dialogRef = useDialogFocus(open, partyCreating ? undefined : onClose);
+
 
   const [selectedMode, setSelectedMode] = useState<PartyMethod>(() => {
     if (initialMode === "auto" || !initialMode) return "e4mc";
@@ -88,16 +91,7 @@ export function CreatePartyModal({
   }, [open, initialMode]);
 
   // Handle escape key
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !partyCreating) {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, partyCreating, onClose]);
+
 
   const isVanilla = !instance.loader || instance.loader.toLowerCase() === "vanilla";
 
@@ -116,6 +110,11 @@ export function CreatePartyModal({
       <div className="modal-backdrop" onClick={() => !partyCreating && onClose()}>
         <motion.div
           className="modal party-create-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("party.createModal.title")}
+          tabIndex={-1}
           onClick={(e) => e.stopPropagation()}
           initial={{ opacity: 0, scale: 0.96, y: 12 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}

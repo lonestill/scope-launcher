@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Box,
@@ -9,6 +9,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { loaders } from "../data";
 import { useI18n } from "../i18n";
 import type {
@@ -17,17 +18,12 @@ import type {
   NewInstanceInput,
 } from "../types";
 
-const PRESETS = [
-  { id: "fabric", label: "Fabric 1.21.1", version: "1.21.1", loader: "Fabric" },
-  { id: "neoforge", label: "NeoForge 1.21.1", version: "1.21.1", loader: "NeoForge" },
-  { id: "vanilla", label: "Vanilla 1.21.4", version: "1.21.4", loader: "Vanilla" },
-];
-
 interface CreateInstanceModalProps {
   open: boolean;
   onClose: () => void;
   onCreate: (input: NewInstanceInput) => Promise<void>;
   availableVersions: MinecraftVersion[];
+  onRefreshVersions: () => Promise<void>;
 }
 
 export function CreateInstanceModal({
@@ -35,24 +31,32 @@ export function CreateInstanceModal({
   onClose,
   onCreate,
   availableVersions,
+  onRefreshVersions,
 }: CreateInstanceModalProps) {
   const { t } = useI18n();
   const [name, setName] = useState("");
   const [version, setVersion] = useState("1.21.1");
-  const [loader, setLoader] = useState("Fabric");
+  const [loader, setLoader] = useState("Vanilla");
   const [color, setColor] = useState<InstanceColor>("lime");
   const [creating, setCreating] = useState(false);
-
+  const [refreshingVersions, setRefreshingVersions] = useState(false);
+  const [versionsError, setVersionsError] = useState(false);
+  const initializedVersion = useRef(false);
   useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, onClose]);
+    if (open && !initializedVersion.current && availableVersions.length) {
+      initializedVersion.current = true;
+      setVersion((availableVersions.find((item) => item.type === "release") || availableVersions[0]).id);
+    }
+  }, [open, availableVersions]);
+  const refreshVersions = async () => {
+    setRefreshingVersions(true);
+    setVersionsError(false);
+    try { await onRefreshVersions(); } catch { setVersionsError(true); }
+    finally { setRefreshingVersions(false); }
+  };
+
+  const dialogRef = useDialogFocus(open, creating ? undefined : onClose);
+  const versionIds = [...new Set([version, ...availableVersions.map((item) => item.id)])];
 
   const valid = useMemo(() => name.trim().length >= 2, [name]);
 
@@ -83,23 +87,28 @@ export function CreateInstanceModal({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) onClose();
+            if (event.target === event.currentTarget && !creating) onClose();
           }}
         >
           <motion.div
             className="modal create-modal"
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-instance-title"
+            tabIndex={-1}
             initial={{ opacity: 0, scale: 0.96, y: 16 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 10 }}
             transition={{ type: "spring", stiffness: 420, damping: 34 }}
           >
-            <button className="modal__close" onClick={onClose} aria-label={t("common.close")}>
+            <button className="modal__close" disabled={creating} onClick={onClose} aria-label={t("common.close")}>
               <X size={18} />
             </button>
             <div className="modal__eyebrow">
               <Sparkles size={14} /> {t("create.eyebrow")}
             </div>
-            <h2>{t("create.title")}</h2>
+            <h2 id="create-instance-title">{t("create.title")}</h2>
             <p className="modal__subtitle">
               {t("create.subtitle")}
             </p>
@@ -120,7 +129,9 @@ export function CreateInstanceModal({
               <div className="field__control">
                 <Box size={16} />
                 <input
-                  autoFocus
+                  aria-describedby="create-name-hint"
+                  aria-invalid={name.length > 0 && !valid}
+                  disabled={creating}
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                   onKeyDown={(event) => {
@@ -133,28 +144,39 @@ export function CreateInstanceModal({
               </div>
             </label>
 
+            <p className="field-hint" id="create-name-hint">{t("create.nameHint")}</p>
             <div className="create-presets">
               <span className="create-presets__label">{t("create.quickPresets")}</span>
               <div className="create-presets__list">
-                {PRESETS.map((preset) => {
-                  const isSelected = version === preset.version && loader === preset.loader;
+                {["Vanilla", "Fabric", "NeoForge"].map((preset) => {
+                  const isSelected = loader === preset;
                   return (
                     <button
-                      key={preset.id}
+                      key={preset}
                       type="button"
+                      disabled={creating}
+                      aria-pressed={isSelected}
                       className={`create-preset-btn ${isSelected ? "is-active" : ""}`}
                       onClick={() => {
-                        setVersion(preset.version);
-                        setLoader(preset.loader);
+                        setLoader(preset);
                       }}
                     >
-                      {preset.label}
+                      {preset === "Vanilla" ? t("create.modeVanilla") : preset}
                     </button>
                   );
                 })}
               </div>
             </div>
 
+            <p className="field-hint">{t("create.loaderHint")}</p>
+            {(!availableVersions.length || versionsError) && (
+              <div className="field-hint" role="status">
+                <p>{t("create.versionsFallback")}</p>
+                <button className="button button--secondary" disabled={refreshingVersions || creating} onClick={() => void refreshVersions()}>
+                  {t(refreshingVersions ? "onboarding.system.checking" : "onboarding.system.retry")}
+                </button>
+              </div>
+            )}
             <div className="field-row">
               <label className="field">
                 <span>{t("create.version")}</span>
@@ -162,12 +184,10 @@ export function CreateInstanceModal({
                   <Layers3 size={16} />
                   <select
                     value={version}
+                    disabled={creating}
                     onChange={(event) => setVersion(event.target.value)}
                   >
-                    {(availableVersions.length
-                      ? availableVersions.map((item) => item.id)
-                      : ["1.21.1", "1.20.1"]
-                    ).map((item) => (
+                    {versionIds.map((item) => (
                       <option key={item}>{item}</option>
                     ))}
                   </select>
@@ -180,6 +200,7 @@ export function CreateInstanceModal({
                   <Box size={16} />
                   <select
                     value={loader}
+                    disabled={creating}
                     onChange={(event) => setLoader(event.target.value)}
                   >
                     {loaders.map((item) => (
@@ -205,6 +226,9 @@ export function CreateInstanceModal({
                 ).map(([id, value]) => (
                   <button
                     key={id}
+                    aria-label={t(`instanceSettings.color.${id}`)}
+                    aria-pressed={color === id}
+                    disabled={creating}
                     className={color === id ? "is-active" : ""}
                     style={{ "--swatch": value } as React.CSSProperties}
                     onClick={() => setColor(id)}
@@ -216,7 +240,7 @@ export function CreateInstanceModal({
             </div>
 
             <div className="modal__footer">
-              <button className="button button--ghost" onClick={onClose}>
+              <button className="button button--ghost" disabled={creating} onClick={onClose}>
                 {t("create.cancel")}
               </button>
               <button

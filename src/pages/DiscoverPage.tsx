@@ -30,6 +30,8 @@ import type {
 import { compactNumber } from "../utils";
 
 interface DiscoverPageProps {
+  initialQuery?: string;
+  initialProjectType?: "mod" | "modpack";
   downloads: DownloadTask[];
   onInstall: (project: CatalogProject, targetInstanceId?: string) => void;
   onNavigate: (route: RouteId) => void;
@@ -43,6 +45,8 @@ interface DiscoverPageProps {
 type ProjectType = "modpack" | "mod" | "resourcepack" | "shader";
 
 export function DiscoverPage({
+  initialQuery = "",
+  initialProjectType,
   downloads,
   onInstall,
   onNavigate,
@@ -54,9 +58,9 @@ export function DiscoverPage({
 }: DiscoverPageProps) {
   const { locale, t } = useI18n();
   const [selectedProject, setSelectedProject] = useState<CatalogProject | null>(null);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
   const [source, setSource] = useState<"modrinth" | "curseforge">("modrinth");
-  const [projectType, setProjectType] = useState<ProjectType>("modpack");
+  const [projectType, setProjectType] = useState<ProjectType>(initialProjectType || (targetInstanceId ? "mod" : "modpack"));
   const [projects, setProjects] = useState<CatalogProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
@@ -88,7 +92,6 @@ export function DiscoverPage({
       } else {
         setLoader("");
       }
-      setProjectType((curr) => (curr === "modpack" ? "mod" : curr));
     } else if (prevTargetIdRef.current && !targetInstanceId) {
       setGameVersion("");
       setLoader("");
@@ -189,7 +192,7 @@ export function DiscoverPage({
     }
   };
 
-  const featured = projects[0];
+  const featured = !query.trim() && !gameVersion && !loader ? projects[0] : undefined;
   const list = useMemo(() => projects.slice(featured ? 1 : 0), [featured, projects]);
 
   const projectDescription = (project: CatalogProject) => {
@@ -224,7 +227,7 @@ export function DiscoverPage({
 
   return (
     <motion.div
-      className="page"
+      className="page discover-page"
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -8 }}
@@ -259,7 +262,7 @@ export function DiscoverPage({
         </div>
       </div>
 
-      {instances.length > 0 && (
+      {projectType !== "modpack" && instances.length > 0 && (
         <div className="target-instance-bar">
           <div className="target-instance-bar__left">
             <span className="target-instance-bar__label">
@@ -277,6 +280,7 @@ export function DiscoverPage({
                   }
                   onSelectTargetInstance?.(val || null);
                 }}
+                aria-label={t("discover.targetInstance")}
                 className="target-instance-bar__select"
               >
                 <option value="">{t("discover.targetAny")}</option>
@@ -326,6 +330,7 @@ export function DiscoverPage({
         </div>
       )}
 
+      {projectType === "modpack" && <p className="field-hint">{t("discover.newInstanceHint")}</p>}
       <div className="discover-toolbar">
         <label className="discover-search">
           <Search size={20} />
@@ -463,6 +468,10 @@ export function DiscoverPage({
         <section className="catalog-feature">
           <div
             className="catalog-feature__art"
+            role="button"
+            tabIndex={0}
+            aria-label={t("discover.detailsNamed", { name: featured.title })}
+            onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedProject(featured); } }}
             style={{ cursor: "pointer" }}
             onClick={() => setSelectedProject(featured)}
           >
@@ -518,9 +527,9 @@ export function DiscoverPage({
               <InstallButton
                 task={installState(featured.project_id)}
                 isInstalled={isProjectInstalled(featured)}
-                onClick={() => onInstall(featured, targetInstanceId || undefined)}
+                onClick={() => onInstall(featured, projectType === "modpack" ? undefined : targetInstanceId || undefined)}
                 unavailable={offline}
-                targetInstanceName={targetInstance?.name}
+                targetInstanceName={projectType === "modpack" ? undefined : targetInstance?.name}
               />
               <button
                 className="button button--glass"
@@ -576,6 +585,12 @@ export function DiscoverPage({
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: Math.min(index * 0.025, 0.2) }}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={t("discover.detailsNamed", { name: project.title })}
+                  onKeyDown={(event) => {
+                    if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setSelectedProject(project); }
+                  }}
                   onClick={() => setSelectedProject(project)}
                 >
                   <div className="project-card__head">
@@ -645,10 +660,11 @@ export function DiscoverPage({
                       </span>
                     </div>
                     <button
+                      aria-label={isDone ? t("discover.inLibrary") : t("discover.installNamed", { name: project.title })}
                       className={`project-install ${isDone ? "is-done" : ""}`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onInstall(project, targetInstanceId || undefined);
+                        onInstall(project, projectType === "modpack" ? undefined : targetInstanceId || undefined);
                       }}
                       disabled={
                         offline ||

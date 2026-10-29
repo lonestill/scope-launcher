@@ -1,3 +1,4 @@
+const { currentLaunchLog } = require("./launch-log.cjs");
 const RULES = [
   {
     code: "out-of-memory",
@@ -107,7 +108,7 @@ const RULES = [
 ];
 
 function analyzeMinecraftLog(content = "") {
-  const text = String(content).slice(-500_000);
+  const text = currentLaunchLog(content).slice(-500_000);
   return RULES.filter((rule) => rule.pattern.test(text)).map(
     ({ pattern: _pattern, ...diagnosis }) => diagnosis,
   );
@@ -117,18 +118,21 @@ const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
 
-async function extractCrashReport({ instanceDirectory, logContent = "", exitCode = 1 }) {
+async function extractCrashReport({ instanceDirectory, logContent = "", exitCode = 1, startedAt = null }) {
+  logContent = currentLaunchLog(logContent);
   let crashFilePath = null;
 
   const markerMatch = logContent.match(/Crash report saved to:\s*(?:#@!@#\s*)?([^\r\n#]+)/i);
   if (markerMatch && markerMatch[1]) {
     const candidate = markerMatch[1].trim();
-    if (fs.existsSync(candidate)) {
+    if (fs.existsSync(candidate) && instanceDirectory &&
+        path.resolve(candidate).startsWith(`${path.resolve(instanceDirectory, "crash-reports")}${path.sep}`) &&
+        (!Number.isFinite(startedAt) || (await fsp.stat(candidate)).mtimeMs >= startedAt)) {
       crashFilePath = candidate;
     }
   }
 
-  if (!crashFilePath && instanceDirectory) {
+  if (!crashFilePath && instanceDirectory && Number.isFinite(startedAt)) {
     const crashReportsDir = path.join(instanceDirectory, "crash-reports");
     try {
       if (fs.existsSync(crashReportsDir)) {
@@ -142,7 +146,7 @@ async function extractCrashReport({ instanceDirectory, logContent = "", exitCode
             }))
           );
           stats.sort((a, b) => b.mtime - a.mtime);
-          if (Date.now() - stats[0].mtime < 15 * 60 * 1000) {
+          if (stats[0].mtime >= startedAt && stats[0].mtime <= Date.now() + 1000) {
             crashFilePath = stats[0].file;
           }
         }
@@ -182,13 +186,10 @@ async function extractCrashReport({ instanceDirectory, logContent = "", exitCode
       }
 
       const fullStack = stackLines.join("\n").trim();
-      let suspectedCulprit = null;
-      if (raw.includes("onyx-fps-agent") || raw.includes("OnyxFpsTracker")) {
-        suspectedCulprit = "onyx-fps-agent.jar (Launcher FPS Probe)";
-      } else {
-        const modMatch = raw.match(/Mod '([^']+)'/i) || raw.match(/plugin '([^']+)'/i) || raw.match(/\[([^\]]+\.jar)\]/i);
-        if (modMatch) suspectedCulprit = modMatch[1];
-      }
+      // A mod list or a JVM argument is not evidence that the mod caused a crash.
+      const reportedFiles = [...new Set([...raw.matchAll(/^\s*Mod File:\s*(?:[^\r\n]*[\\/])?([^\\/\r\n]+\.jar)\s*$/gim)]
+        .map((match) => match[1].trim()))];
+      const suspectedCulprit = reportedFiles.length === 1 ? reportedFiles[0] : null;
 
       return {
         foundCrashReport: true,

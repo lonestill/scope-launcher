@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -28,6 +29,8 @@ export function ShareModpackModal({
   onNotify,
 }: ShareModpackModalProps) {
   const { t, locale } = useI18n();
+  const dialogRef = useDialogFocus(Boolean(instance), onClose);
+
   const isRu = locale === "ru";
 
   const [mode, setMode] = useState<"link" | "file">("link");
@@ -95,6 +98,11 @@ export function ShareModpackModal({
       >
         <motion.div
           className="modal create-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={instance?.name}
+          tabIndex={-1}
           initial={{ opacity: 0, scale: 0.96, y: 16 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.97, y: 10 }}

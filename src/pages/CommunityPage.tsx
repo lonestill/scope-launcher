@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Star, MessageSquarePlus, ExternalLink, Inbox, Loader2 } from "lucide-react";
+import packageJson from "../../package.json";
 import { useI18n } from "../i18n";
 import type { LauncherSettings } from "../types";
 
@@ -77,7 +78,7 @@ export function CommunityPage({
           title: formTitle.trim(),
           comment: formComment.trim(),
           contact: formContact.trim() || undefined,
-          launcher_version: "2.0.4",
+          launcher_version: packageJson.version,
           os: navigator.userAgent.includes("Mac") ? "macOS" : "Windows",
           arch: "arm64",
           tags: [formType === "review" ? "Review" : formType === "bug" ? "Bug" : "Suggestion"],

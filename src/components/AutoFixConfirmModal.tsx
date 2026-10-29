@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   AlertTriangle,
@@ -43,15 +43,10 @@ export function AutoFixConfirmModal({
   onConfirm,
 }: AutoFixConfirmModalProps) {
   const { t } = useI18n();
+  const dialogRef = useDialogFocus(Boolean(fixAction && instance), busy ? undefined : onClose);
 
-  useEffect(() => {
-    if (!fixAction) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [fixAction, busy, onClose]);
+
+
 
   if (!fixAction || !instance) return null;
 
@@ -135,6 +130,11 @@ export function AutoFixConfirmModal({
       >
         <motion.div
           className="modal autofix-confirm-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("crash.autofix.confirm.title")}
+          tabIndex={-1}
           initial={{ opacity: 0, scale: 0.96, y: 12 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.98, y: 8 }}

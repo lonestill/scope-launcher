@@ -26,6 +26,9 @@ const {
   parseServerAddress,
 } = require("./services/minecraft.cjs");
 const { ModpackService } = require("./services/modpack.cjs");
+const { recoverInstanceUpdates } = require("./services/instance-update.cjs");
+const { createStateWriter } = require("./services/state-storage.cjs");
+const { satisfiesMinecraftVersion } = require("./services/version-range.cjs");
 const {
   checkModUpdates,
   listModHistory,
@@ -268,6 +271,10 @@ function offlineUuid(name) {
     hex.slice(20, 32),
   ].join("-");
 }
+const crashFixLocks = new Set();
+let nativeRepairInProgress = false;
+const launchLocks = new Set();
+const packUpdateLocks = new Set();
 const installLocks = new Map();
 const installControllers = new Map();
 const downloadControllers = new Map();
@@ -303,7 +310,8 @@ function onyxRoot() {
   return preferred;
 }
 
-function createServices() {
+function createServices({ nativeRepair = false } = {}) {
+  if (nativeRepairInProgress && !nativeRepair) throw new Error("Finish native library repair first");
   const sharedRoot = path.join(onyxRoot(), "shared");
   const minecraftService = new MinecraftService({
     sharedRoot,
@@ -479,6 +487,7 @@ async function loadState() {
       instance.status = instance.resolvedVersionId ? "ready" : "setup";
     }
   }
+  await recoverInstanceUpdates({ instancesRoot: state.settings.gameDirectory, instances: state.instances });
   for (const task of state.downloads) {
     if (
       task.status === "queued" ||
@@ -504,18 +513,11 @@ async function loadState() {
   await saveState();
 }
 
-let savePromise = Promise.resolve();
+const writeState = createStateWriter();
 
 async function saveState() {
-  savePromise = savePromise.then(async () => {
-    if (!statePath) statePath = getStatePath();
-    await fsp.mkdir(path.dirname(statePath), { recursive: true });
-    const temporaryPath = `${statePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-    await fsp.writeFile(temporaryPath, JSON.stringify(state, null, 2), "utf8");
-    await fsp.rm(statePath, { force: true }).catch(() => undefined);
-    await fsp.rename(temporaryPath, statePath);
-  });
-  return savePromise;
+  if (!statePath) statePath = getStatePath();
+  return writeState(statePath, state);
 }
 
 function send(channel, payload) {
@@ -609,8 +611,8 @@ async function createWindow() {
     height: bounds.height || 900,
     x: capturePath ? -10_000 : bounds.x,
     y: capturePath ? -10_000 : bounds.y,
-    minWidth: 1120,
-    minHeight: 700,
+    minWidth: 960,
+    minHeight: 600,
     frame: false,
     titleBarStyle: "hidden",
     backgroundColor: "#090b0d",
@@ -858,15 +860,15 @@ function instanceUpdate(instance, patch) {
   send("instance:updated", structuredClone(instance));
 }
 
-async function runInstall(instance) {
+async function runInstall(instance, onProgress) {
   if (installLocks.has(instance.id)) return installLocks.get(instance.id);
   const controller = new AbortController();
   installControllers.set(instance.id, controller);
   const promise = (async () => {
     const { minecraftService } = createServices();
     instanceUpdate(instance, { status: "installing", installProgress: 0 });
-    await saveState();
     try {
+      await saveState();
       const installed = await minecraftService.installInstance(
         instance,
         effectiveSettings(instance),
@@ -876,6 +878,7 @@ async function runInstall(instance) {
             installProgress: progress.progress,
             installMessage: progress.message,
           });
+          onProgress?.(progress);
           send("launcher:progress", {
             instanceId: instance.id,
             ...progress,
@@ -1003,7 +1006,7 @@ async function resolveRequiredModVersions(rootVersion, profile, signal) {
   return resolved;
 }
 
-async function installModToInstance(project, targetInstance, task, signal) {
+async function installModToInstance(project, targetInstance, task, signal, options = {}) {
   const profile = loaderInfo(targetInstance);
   if (project.project_type === "mod" && profile.loader === "vanilla") {
     throw new Error(
@@ -1088,6 +1091,9 @@ async function installModToInstance(project, targetInstance, task, signal) {
       )}/version`,
       { signal },
     );
+  }
+  if (options.versionRange) {
+    versions = versions.filter((version) => satisfiesMinecraftVersion(version.version_number, options.versionRange) === true);
   }
   const version =
     versions?.find((item) => item.version_type === "release") || versions?.[0];
@@ -1403,7 +1409,7 @@ function registerIpc() {
     return true;
   });
   ipcMain.handle("state:move-game-directory", async (_event, targetPath) => {
-    if (runningGames.size || installControllers.size) {
+    if (runningGames.size || installControllers.size || crashFixLocks.size || launchLocks.size || packUpdateLocks.size) {
       throw new Error("Finish running games and active installations first");
     }
     const sourceRoot = path.resolve(state.settings.gameDirectory);
@@ -1498,6 +1504,7 @@ function registerIpc() {
   });
   ipcMain.handle("instance:delete", async (_event, id) => {
     if (runningGames.has(id)) throw new Error("Stop the game first");
+    if (crashFixLocks.has(id) || nativeRepairInProgress || launchLocks.has(id) || packUpdateLocks.has(id) || installLocks.has(id)) throw new Error("Finish the active instance operation first");
     const instance = state.instances.find((item) => item.id === id);
     if (!instance) return false;
     const directory = path.join(state.settings.gameDirectory, id);
@@ -1521,6 +1528,7 @@ function registerIpc() {
   ipcMain.handle("instance:update", async (_event, id, patch) => {
     const instance = findInstance(id);
     if (runningGames.has(id)) throw new Error("Stop the game first");
+    if (crashFixLocks.has(id) || nativeRepairInProgress || launchLocks.has(id) || packUpdateLocks.has(id) || installLocks.has(id)) throw new Error("Finish the active instance operation first");
     if (typeof patch?.name === "string") {
       const name = patch.name.trim().slice(0, 48);
       if (!name) throw new Error("The instance name cannot be empty");
@@ -1663,7 +1671,11 @@ function registerIpc() {
         recursive: true,
         errorOnExist: true,
       });
-    } catch {
+    } catch (error) {
+      await fsp.rm(destination, { recursive: true, force: true }).catch(() => undefined);
+      if (error.code !== "ENOENT" || source.resolvedVersionId) throw error;
+      // A never-installed empty instance has no directory to copy.
+      await fsp.access(sourceDirectory).then(() => { throw error; }, (missing) => { if (missing.code !== "ENOENT") throw error; });
       await fsp.mkdir(destination, { recursive: true });
     }
     state.instances.unshift(duplicate);
@@ -1955,8 +1967,9 @@ function registerIpc() {
       });
     },
   );
-  ipcMain.handle("instance:crash-detect-autofix", async (_event, id) => {
-    const instance = findInstance(id);
+  async function detectInstanceCrashFix(instance) {
+    const id = instance.id;
+    if (instance.lastExitCode === 0) return null;
     const instanceDirectory = path.join(state.settings.gameDirectory, id);
     let logContent = "";
     if (instance.lastLogPath && fs.existsSync(instance.lastLogPath)) {
@@ -1974,14 +1987,19 @@ function registerIpc() {
     const crashReport = await extractCrashReport({
       instanceDirectory,
       logContent,
-      exitCode: instance.lastExitCode || 1,
+      exitCode: instance.lastExitCode ?? 1,
+      startedAt: Date.parse(state.sessions.find((session) => session.instanceId === id)?.startedAt || ""),
     });
-    const fixAction = await detectCrashAutoFix({
-      instance,
+    return detectCrashAutoFix({
+      instance: { ...instance, settings: effectiveSettings(instance) },
       logContent,
       crashReport,
       instancesRoot: state.settings.gameDirectory,
     });
+  }
+  ipcMain.handle("instance:crash-detect-autofix", async (_event, id) => {
+    const instance = findInstance(id);
+    const fixAction = await detectInstanceCrashFix(instance);
     instance.lastAutoFix = fixAction || null;
     instanceUpdate(instance, { lastAutoFix: instance.lastAutoFix });
     await saveState();
@@ -1992,22 +2010,39 @@ function registerIpc() {
     if (runningGames.has(id)) {
       throw new Error("Stop the game first");
     }
+    if (nativeRepairInProgress || crashFixLocks.has(id) || launchLocks.has(id) || packUpdateLocks.has(id) || installLocks.has(id)) throw new Error("Finish the active instance operation first");
+    const rebuildingNatives = fixAction?.type === "purge-corrupted-natives";
+    if (rebuildingNatives && (runningGames.size > 0 || launchLocks.size > 0 || installControllers.size > 0 || downloadControllers.size > 0 || packUpdateLocks.size > 0)) throw new Error("Finish running games and installations before rebuilding shared native libraries");
+    crashFixLocks.add(id);
+    if (rebuildingNatives) nativeRepairInProgress = true;
+    try {
+    const currentFix = await detectInstanceCrashFix(instance);
+    if (!currentFix || currentFix.type !== fixAction?.type ||
+        JSON.stringify(currentFix.payload) !== JSON.stringify(fixAction.payload)) {
+      throw new Error("The crash evidence changed; run diagnostics again before applying this fix");
+    }
     const result = await applyCrashAutoFix({
       fixAction,
       instance,
       instancesRoot: state.settings.gameDirectory,
-      installModFn: async ({ projectId }) => {
+      installModFn: async ({ projectId, versionRange }) => {
         const project = await fetchJson(
           `https://api.modrinth.com/v2/project/${encodeURIComponent(projectId)}`,
         );
+        if (project.project_type !== "mod") throw new Error("The dependency project is not a mod");
         const task = {
           id: crypto.randomUUID(),
           name: project.title || projectId,
           status: "installing",
         };
         const controller = new AbortController();
-        await installModToInstance(project, instance, task, controller.signal);
+        const installed = await installModToInstance(project, instance, task, controller.signal, { versionRange });
+        const rootMod = installed.installed.find((item) => item.version.id === installed.version.id);
+        if (!rootMod) throw new Error("The requested dependency was not installed");
+        await fsp.access(rootMod.destination);
       },
+      repairNativesFn: async () => createServices({ nativeRepair: true }).minecraftService.repairNatives(instance),
+      resolveJavaFn: async (major) => javaService.resolve(major, ""),
       repairInstanceFn: async () => {
         await runInstall(instance);
       },
@@ -2015,13 +2050,17 @@ function registerIpc() {
         await saveState();
       },
     });
-    instanceUpdate(instance, {
+    if (result.success) instanceUpdate(instance, {
       lastAutoFix: null,
       lastDiagnosis: null,
       settings: instance.settings,
     });
-    await saveState();
+    if (result.success) await saveState();
     return result;
+    } finally {
+      crashFixLocks.delete(id);
+      if (rebuildingNatives) nativeRepairInProgress = false;
+    }
   });
   ipcMain.handle("instance:world-snapshots", (_event, id) => {
     findInstance(id);
@@ -2093,6 +2132,7 @@ function registerIpc() {
   ipcMain.handle("instance:repair", async (_event, id) => {
     const instance = findInstance(id);
     if (runningGames.has(id)) throw new Error("Stop the game first");
+    if (crashFixLocks.has(id) || nativeRepairInProgress || launchLocks.has(id) || packUpdateLocks.has(id) || installLocks.has(id)) throw new Error("Finish the active instance operation first");
     await runInstall(instance);
     return structuredClone(instance);
   });
@@ -2133,9 +2173,13 @@ function registerIpc() {
   ipcMain.handle("instance:update-pack", async (_event, id) => {
     const instance = findInstance(id);
     if (runningGames.has(id)) throw new Error("Stop the game first");
+    if (crashFixLocks.has(id) || nativeRepairInProgress || launchLocks.has(id) || packUpdateLocks.has(id) || installLocks.has(id)) throw new Error("Finish the active instance operation first");
     if (!instance.sourceProjectId) {
       throw new Error("The instance is not linked to a Modrinth project");
     }
+    const originalInstance = structuredClone(instance);
+    let updateResult;
+    packUpdateLocks.add(id);
     const originalStatus = instance.resolvedVersionId ? "ready" : "setup";
     const controller = new AbortController();
     installControllers.set(id, controller);
@@ -2144,8 +2188,8 @@ function registerIpc() {
       installProgress: 1,
       installMessage: "Creating a restore point…",
     });
-    await saveState();
     try {
+      await saveState();
       const backupsRoot = path.join(onyxRoot(), "backups", instance.id);
       const backupPath = path.join(
         backupsRoot,
@@ -2180,7 +2224,7 @@ function registerIpc() {
           ),
       );
       const { modpackService } = createServices();
-      const result = await modpackService.updateProject({
+      const result = updateResult = await modpackService.updateProject({
         instance,
         settings: effectiveSettings(instance),
         signal: controller.signal,
@@ -2205,6 +2249,7 @@ function registerIpc() {
         lastError: null,
       });
       await saveState();
+      await result.finalize?.().catch((error) => console.warn("Update cleanup deferred until restart:", error.message));
       send("instance:updated", structuredClone(instance));
       return {
         updated: result.updated,
@@ -2214,6 +2259,11 @@ function registerIpc() {
         versionNumber: result.release?.version_number || null,
       };
     } catch (error) {
+      if (updateResult?.rollback) {
+        await updateResult.rollback();
+        for (const key of Object.keys(instance)) delete instance[key];
+        Object.assign(instance, originalInstance);
+      }
       const cancelled =
         controller.signal.aborted || error?.name === "AbortError";
       instanceUpdate(instance, {
@@ -2231,6 +2281,7 @@ function registerIpc() {
       throw error;
     } finally {
       installControllers.delete(id);
+      packUpdateLocks.delete(id);
     }
   });
   ipcMain.handle("instance:export-performance-csv", async (_event, id) => {
@@ -2265,6 +2316,7 @@ function registerIpc() {
   ipcMain.handle("instance:backup", async (_event, id) => {
     const instance = findInstance(id);
     if (runningGames.has(id)) throw new Error("Stop the game first");
+    if (crashFixLocks.has(id) || nativeRepairInProgress || launchLocks.has(id) || packUpdateLocks.has(id) || installLocks.has(id)) throw new Error("Finish the active instance operation first");
     const safeName =
       instance.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim() ||
       "Scope instance";
@@ -2367,7 +2419,7 @@ function registerIpc() {
       recognized: profile.mods.filter((mod) => mod.versionId).length,
     };
   });
-  async function importProfileObject(profile, sourceName) {
+  async function importProfileObject(profile, sourceName, onProgress = () => {}) {
     const id = crypto.randomUUID();
     const source = profile.instance;
     const instance = {
@@ -2388,16 +2440,20 @@ function registerIpc() {
       modCount: 0,
       importedAt: new Date().toISOString(),
       syncSource: sourceName || "Shared modpack",
+      syncImportIncomplete: true,
     };
     state.instances.unshift(instance);
     await saveState();
     try {
-      await runInstall(instance);
+      onProgress({ stage: "game", progress: 0 });
+      await runInstall(instance, (progress) => onProgress({ stage: "game", progress: progress.progress }));
+      onProgress({ stage: "mods", progress: 0 });
       const instanceDirectory = path.join(state.settings.gameDirectory, id);
       const installed = await installSyncMods({
         profile,
         instanceDirectory,
-        onProgress: ({ completed, count, received, total, current }) =>
+        onProgress: ({ completed, count, received, total, current }) => {
+          onProgress({ stage: "mods", progress: Math.round((completed / Math.max(count, 1)) * 100), current });
           send("launcher:progress", {
             instanceId: id,
             stage: "sync-mods",
@@ -2405,11 +2461,14 @@ function registerIpc() {
               ? Math.round((received / total) * 100)
               : Math.round((completed / Math.max(count, 1)) * 100),
             message: `Scope Sync: ${current}`,
-          }),
+          });
+        },
       });
       instance.modCount = installed.installed;
       instance.status = "ready";
       instance.syncSkippedMods = installed.skipped;
+      instance.syncImportIncomplete = false;
+      onProgress({ stage: "checking", progress: 100 });
       await preflightInstance(instance, false);
       await saveState();
       send("instance:updated", structuredClone(instance));
@@ -2419,7 +2478,7 @@ function registerIpc() {
         skipped: installed.skipped,
       };
     } catch (error) {
-      instance.status = instance.resolvedVersionId ? "ready" : "error";
+      instance.status = "error";
       instance.lastError =
         error instanceof Error ? error.message : "Scope Sync import error";
       await saveState();
@@ -2482,10 +2541,16 @@ function registerIpc() {
     };
   });
 
-  ipcMain.handle("instance:sync-import-url", async (_event, urlOrId) => {
+  ipcMain.handle("instance:sync-import-url", async (_event, urlOrId, requestId) => {
+    const report = (progress) => {
+      if (typeof requestId === "string" && requestId.length <= 100) {
+        send("sync-import:progress", { requestId, ...progress });
+      }
+    };
+    report({ stage: "profile", progress: 0 });
     const data = await fetchShareProfile(urlOrId);
     const profile = validateSyncProfile(data.profile);
-    return importProfileObject(profile, `Link: ${data.id}`);
+    return importProfileObject(profile, `Link: ${data.id}`, report);
   });
 
   ipcMain.handle("instance:get-pending-deep-link", () => {
@@ -3252,8 +3317,12 @@ function registerIpc() {
   ipcMain.handle("launcher:play", async (_event, instanceId, options = {}) => {
     const instance = state.instances.find((item) => item.id === instanceId);
     if (!instance) return { ok: false, reason: "instance-not-found" };
+    if (instance.syncImportIncomplete) return { ok: false, reason: "incomplete-import", message: "The shared modpack import is incomplete; import it again before launching" };
+    if (crashFixLocks.has(instanceId) || nativeRepairInProgress || launchLocks.has(instanceId) || packUpdateLocks.has(instanceId) || installLocks.has(instanceId)) return { ok: false, reason: "instance-busy", message: "The instance is already being prepared" };
     const existingLaunches = runningGames.get(instanceId);
     const existingCount = existingLaunches?.size || 0;
+    if (existingCount && !options.multiClient) return { ok: false, reason: "already-running", message: "The instance is already running" };
+    launchLocks.add(instanceId);
     try {
       send("launcher:progress", {
         instanceId,
@@ -3371,10 +3440,7 @@ function registerIpc() {
         status: null,
         extraJvmArguments: [],
       }));
-      const logFileName =
-        existingCount > 0
-          ? `scope-client-${existingCount + 1}.log`
-          : "scope-latest.log";
+      const logFileName = `scope-${sessionId}.log`;
       const launch = await minecraftService.buildLaunch({
         instance,
         settings: {
@@ -3412,34 +3478,28 @@ function registerIpc() {
             }
           }
           const stillRunningCount = runningGames.get(instanceId)?.size || 0;
-          if (stillRunningCount > 0) {
-            instanceUpdate(instance, {
-              status: "running",
-              runningCount: stillRunningCount,
-            });
-            await saveState();
-            return;
-          }
-          discordRpcService.instanceGameStates.delete(instanceId);
-          if (state.settings.discordRpc !== false) {
-            if (runningGames.size > 0) {
-              const remainingId = runningGames.keys().next().value;
-              const remainingInstance = state.instances.find(
-                (i) => i.id === remainingId,
-              );
-              if (remainingInstance) {
-                discordRpcService.setPlaying(remainingInstance, {
-                  showGame: state.settings.discordRpcShowGame !== false,
+          if (stillRunningCount === 0) {
+            discordRpcService.instanceGameStates.delete(instanceId);
+            if (state.settings.discordRpc !== false) {
+              if (runningGames.size > 0) {
+                const remainingId = runningGames.keys().next().value;
+                const remainingInstance = state.instances.find(
+                  (i) => i.id === remainingId,
+                );
+                if (remainingInstance) {
+                  discordRpcService.setPlaying(remainingInstance, {
+                    showGame: state.settings.discordRpcShowGame !== false,
+                    showTime: state.settings.discordRpcShowTime !== false,
+                    showServer: state.settings.discordRpcShowServer !== false,
+                    showWorld: state.settings.discordRpcShowWorld !== false,
+                    hideServerIp: state.settings.discordRpcHideServerIp === true,
+                  });
+                }
+              } else {
+                discordRpcService.setIdle(discordRpcService.currentPage || "library", {
                   showTime: state.settings.discordRpcShowTime !== false,
-                  showServer: state.settings.discordRpcShowServer !== false,
-                  showWorld: state.settings.discordRpcShowWorld !== false,
-                  hideServerIp: state.settings.discordRpcHideServerIp === true,
                 });
               }
-            } else {
-              discordRpcService.setIdle(discordRpcService.currentPage || "library", {
-                showTime: state.settings.discordRpcShowTime !== false,
-              });
             }
           }
           const endedAt = Date.now();
@@ -3523,6 +3583,7 @@ function registerIpc() {
               instanceDirectory,
               logContent,
               exitCode: code,
+              startedAt,
             });
 
             const topDiag = diagnoses[0];
@@ -3541,7 +3602,7 @@ function registerIpc() {
             }
 
             const autoFix = await detectCrashAutoFix({
-              instance,
+              instance: { ...instance, settings: effectiveSettings(instance) },
               logContent,
               crashReport,
               instancesRoot: state.settings.gameDirectory,
@@ -3566,7 +3627,8 @@ function registerIpc() {
           state.sessions = state.sessions.slice(0, 500);
           instance.playtimeMinutes =
             Number(instance.playtimeMinutes || 0) + minutes;
-          instance.status = "ready";
+          const remainingCount = runningGames.get(instanceId)?.size || 0;
+          instance.status = remainingCount ? "running" : "ready";
 
           if (telemetryService) {
             void telemetryService.trackGameSession({
@@ -3586,8 +3648,8 @@ function registerIpc() {
           instance.lastDiagnosis = diagnoses[0] || null;
           instance.lastPerformance = performance;
           instanceUpdate(instance, {
-            status: "ready",
-            runningCount: 0,
+            status: remainingCount ? "running" : "ready",
+            runningCount: remainingCount,
             playtimeMinutes: instance.playtimeMinutes,
             lastExitCode: code,
             lastDiagnosis: instance.lastDiagnosis,
@@ -3596,9 +3658,10 @@ function registerIpc() {
           });
           await saveState();
           send("session:recorded", structuredClone(session));
-          if (ghostModeActive) {
+          if (runningGames.size === 0 && ghostModeActive) {
             await restoreLauncherWindow();
           } else if (
+            runningGames.size === 0 &&
             state.settings.closeOnLaunch &&
             mainWindow?.isVisible() === false
           ) {
@@ -3656,6 +3719,8 @@ function registerIpc() {
         message:
           error instanceof Error ? error.message : "Failed to launch the game",
       };
+    } finally {
+      launchLocks.delete(instanceId);
     }
   });
   ipcMain.handle("launcher:stop", async (_event, instanceId, sessionId = null) => {

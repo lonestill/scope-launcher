@@ -23,6 +23,7 @@ import type {
   LauncherSettings,
   MinecraftServerStatus,
 } from "../types";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { isBuiltinPureGame } from "../utils";
 
 const colors: Array<[InstanceColor, TranslationKey]> = [
@@ -112,15 +113,7 @@ export function InstanceSettingsModal({
       .catch(() => undefined);
   }, [globalSettings, instance, t]);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onClose]);
+  const dialogRef = useDialogFocus(Boolean(instance), busy ? undefined : onClose);
 
   const save = async () => {
     if (!instance || !name.trim()) return;
@@ -191,11 +184,16 @@ export function InstanceSettingsModal({
         >
           <motion.div
             className="modal instance-settings-modal"
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("instanceSettings.eyebrow")}
+            tabIndex={-1}
             initial={{ opacity: 0, scale: 0.97, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.98, y: 8 }}
           >
-            <button className="modal__close" onClick={onClose} aria-label={t("common.close")}>
+            <button className="modal__close" disabled={busy} onClick={onClose} aria-label={t("common.close")}>
               <X size={18} />
             </button>
             <div className="modal__eyebrow">

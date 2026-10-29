@@ -1642,11 +1642,7 @@ export function InstancePage({
             {id === "servers" && servers.length > 0 && (
               <small>{servers.length}</small>
             )}
-            {id === "diagnostics" && (
-              <small>
-                {recordedSessions.length + worldSnapshots.length + (bisect ? 1 : 0)}
-              </small>
-            )}
+
           </button>
         ))}
       </nav>

@@ -78,6 +78,15 @@ export function InstanceCard({
       } ${onOpen ? "is-clickable" : ""}`}
       whileHover={{ y: -3 }}
       transition={{ duration: 0.22 }}
+      role={onOpen ? "link" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      aria-label={onOpen ? t("instance.openNamed", { name: instance.name }) : undefined}
+      onKeyDown={(event) => {
+        if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onOpen?.(instance);
+        }
+      }}
       onClick={(event) => {
         if (
           event.target instanceof HTMLElement &&

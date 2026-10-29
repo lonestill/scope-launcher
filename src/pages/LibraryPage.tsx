@@ -172,7 +172,7 @@ export function LibraryPage({
                   <ArchiveRestore size={15} />
                   <div>
                     <strong>{t("library.restore")}</strong>
-                    <small>.tar.gz backup</small>
+                    <small>.scopepack · .onyxpack · .zip</small>
                   </div>
                 </button>
                 <button

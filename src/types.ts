@@ -83,6 +83,7 @@ export interface GameInstance {
   modCount: number;
   packPath?: string;
   resolvedVersionId?: string;
+  syncImportIncomplete?: boolean;
   javaPath?: string;
   javaMajor?: number;
   installProgress?: number;
@@ -997,7 +998,7 @@ export interface OnyxBridge {
       author?: string | null;
       mods: Array<{ name: string; enabled: boolean; versionId?: string | null }>;
     }>;
-    importSyncProfileUrl(urlOrId: string): Promise<{
+    importSyncProfileUrl(urlOrId: string, requestId?: string): Promise<{
       instance: GameInstance;
       installed: number;
       skipped: number;
@@ -1205,6 +1206,7 @@ export interface OnyxBridge {
   onWindowMaximized(callback: (maximized: boolean) => void): () => void;
   onInstanceUpdated(callback: (instance: GameInstance) => void): () => void;
   onSessionRecorded(callback: (session: PlaySession) => void): () => void;
+  onSyncImportProgress(callback: (progress: { requestId: string; stage: "profile" | "game" | "mods" | "checking"; progress: number; current?: string }) => void): () => void;
   onLauncherProgress(
     callback: (progress: LauncherProgress) => void,
   ): () => void;

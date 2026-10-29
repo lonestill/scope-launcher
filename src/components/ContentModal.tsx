@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -39,6 +40,8 @@ export function ContentModal({
   ) => void;
 }) {
   const { locale, t } = useI18n();
+  const dialogRef = useDialogFocus(Boolean(instance), onClose);
+
   const [items, setItems] = useState<InstanceContent[]>([]);
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -99,14 +102,7 @@ export function ContentModal({
     void load();
   }, [load]);
 
-  useEffect(() => {
-    if (!instance) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [instance, onClose]);
+
 
   useEffect(() => {
     return window.onyx.onContentUpdateProgress((event) => {
@@ -187,6 +183,11 @@ export function ContentModal({
         >
           <motion.div
             className="modal content-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("content.title")}
+          tabIndex={-1}
             initial={{ opacity: 0, scale: 0.97, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.98, y: 8 }}

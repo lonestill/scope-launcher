@@ -89,8 +89,8 @@ const api = {
       ipcRenderer.invoke("instance:sync-share", id),
     previewSyncProfile: (urlOrId) =>
       ipcRenderer.invoke("instance:sync-preview-url", urlOrId),
-    importSyncProfileUrl: (urlOrId) =>
-      ipcRenderer.invoke("instance:sync-import-url", urlOrId),
+    importSyncProfileUrl: (urlOrId, requestId) =>
+      ipcRenderer.invoke("instance:sync-import-url", urlOrId, requestId),
     getPendingDeepLink: () =>
       ipcRenderer.invoke("instance:get-pending-deep-link"),
     importSyncProfile: () => ipcRenderer.invoke("instance:sync-import"),
@@ -233,6 +233,11 @@ const api = {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("session:recorded", listener);
     return () => ipcRenderer.removeListener("session:recorded", listener);
+  },
+  onSyncImportProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("sync-import:progress", listener);
+    return () => ipcRenderer.removeListener("sync-import:progress", listener);
   },
   onLauncherProgress: (callback) => {
     const listener = (_event, payload) => callback(payload);

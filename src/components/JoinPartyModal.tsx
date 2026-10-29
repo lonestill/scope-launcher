@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -56,6 +57,8 @@ export function JoinPartyModal({
   onNotify,
 }: JoinPartyModalProps) {
   const { t } = useI18n();
+  const dialogRef = useDialogFocus(open, onClose);
+
 
   const [inputVal, setInputVal] = useState("");
   const [selectedInstanceId, setSelectedInstanceId] = useState<string>("");
@@ -240,6 +243,11 @@ export function JoinPartyModal({
       <div className="modal-backdrop" onClick={onClose}>
         <motion.div
           className="modal modal--medium party-join-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("party.joinModal.title")}
+          tabIndex={-1}
           onClick={(e) => e.stopPropagation()}
           initial={{ opacity: 0, scale: 0.97, y: 10 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}

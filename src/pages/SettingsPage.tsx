@@ -1174,6 +1174,7 @@ function ToggleRow({
       </div>
       <button
         role="switch"
+        aria-label={title}
         aria-checked={checked}
         className={`toggle ${checked ? "is-on" : ""}`}
         onClick={() => onChange(!checked)}

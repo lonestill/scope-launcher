@@ -10367,3 +10367,189 @@ html[data-motion="reduced"] *::after {
   gap: 6px;
 }
 
+
+/* Keep everyday tasks visible and dialogs usable in a compact window. */
+.field-hint {
+  margin: 8px 0 14px;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.modal-backdrop,
+.command-backdrop {
+  overflow-y: auto;
+  align-items: safe center;
+}
+
+.modal {
+  max-height: calc(100dvh - 104px);
+  overflow-y: auto;
+}
+
+.onboarding-card {
+  min-height: min(600px, calc(100dvh - 104px));
+  max-height: calc(100dvh - 104px);
+  overflow-y: auto;
+}
+
+.modal__footer {
+  flex-wrap: wrap;
+}
+
+.import-progress {
+  display: grid;
+  gap: 8px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.import-progress progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.import-progress p,
+.import-progress span {
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.background-import {
+  position: fixed;
+  bottom: 20px;
+  right: 24px;
+  z-index: 200;
+  display: flex;
+  max-width: min(480px, calc(100vw - 48px));
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.server-disclosure > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.server-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.server-disclosure > summary::after {
+  content: "+";
+  margin-left: auto;
+  color: var(--text-soft);
+  font-size: 20px;
+}
+
+.server-disclosure[open] > summary::after {
+  content: "−";
+}
+
+.catalog-feature {
+  min-height: 112px;
+  grid-template-columns: 96px minmax(0, 1fr);
+  border-radius: 12px;
+}
+
+.catalog-feature__art {
+  min-height: 112px;
+}
+
+.catalog-feature__art img {
+  width: 60px;
+  height: 60px;
+  border-radius: 12px;
+}
+
+.catalog-feature__copy {
+  padding: 14px 18px;
+}
+
+.catalog-feature__copy h2 {
+  margin: 4px 0 8px;
+  font-size: 19px;
+}
+
+.catalog-feature__copy > p,
+.catalog-feature__meta,
+.catalog-feature__chips {
+  display: none;
+}
+
+.catalog-feature__actions .button {
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+@media (max-width: 1100px) {
+  .discover-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .discover-search {
+    flex-basis: 100%;
+  }
+
+  .discover-filters,
+  .page-heading__actions,
+  .target-instance-bar,
+  .instance-page-tabs {
+    flex-wrap: wrap;
+  }
+
+  .catalog-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+
+  .settings-nav {
+    position: static;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1000px) {
+  .app-body {
+    grid-template-columns: 160px minmax(0, 1fr);
+  }
+
+  .titlebar {
+    grid-template-columns: 160px minmax(260px, 1fr) auto;
+  }
+
+  .page {
+    padding: 22px;
+  }
+
+  .page-heading {
+    flex-wrap: wrap;
+    gap: 14px;
+  }
+}
+
+.discover-page .page-heading {
+  margin-bottom: 18px;
+}
+
+.discover-page .page-heading h1 {
+  font-size: 30px;
+}
+
+.discover-page .page-heading .eyebrow,
+.discover-page .page-heading h1 + p {
+  display: none;
+}

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   X,
@@ -8,6 +8,7 @@ import {
   Loader2,
   Clipboard,
 } from "lucide-react";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useI18n } from "../i18n";
 import type { GameInstance } from "../types";
 
@@ -15,7 +16,8 @@ interface ImportLinkModalProps {
   open: boolean;
   initialUrl?: string | null;
   onClose: () => void;
-  onSuccess: (instance: GameInstance, installed: number, skipped: number) => void;
+  onSuccess: (instance: GameInstance, installed: number, skipped: number, foreground: boolean) => void;
+  onReopen: () => void;
   onNotify: (tone: "success" | "warning" | "info", title: string, message: string) => void;
 }
 
@@ -34,6 +36,7 @@ export function ImportLinkModal({
   initialUrl,
   onClose,
   onSuccess,
+  onReopen,
   onNotify,
 }: ImportLinkModalProps) {
   const { t, locale } = useI18n();
@@ -44,10 +47,22 @@ export function ImportLinkModal({
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<PackPreview | null>(null);
+  const [progress, setProgress] = useState<{ stage: "profile" | "game" | "mods" | "checking"; progress: number; current?: string }>({ stage: "profile", progress: 0 });
+  const jobRef = useRef<string | null>(null);
+  const previewRequest = useRef(0);
+  const latest = useRef({ open, onSuccess, onClose });
+  useLayoutEffect(() => { latest.current = { open, onSuccess, onClose }; });
+  const dialogRef = useDialogFocus(open, onClose);
+  useEffect(() => window.onyx.onSyncImportProgress((event) => {
+    if (event.requestId === jobRef.current) setProgress(event);
+  }), []);
 
-  const handleFetchPreview = useCallback(async (urlOrId?: string) => {
-    const target = (urlOrId || inputVal).trim();
+  const handleFetchPreview = useCallback(async (urlOrId: string) => {
+    const target = urlOrId.trim();
+    const request = ++previewRequest.current;
     if (!target) return;
+    setLoadingPreview(false);
+    setPreview(null);
     if (
       target.startsWith("scope://party/") ||
       target.startsWith("onyx://party/") ||
@@ -61,15 +76,16 @@ export function ImportLinkModal({
     setError(null);
     try {
       const data = await window.onyx.state.previewSyncProfile(target);
-      setPreview(data);
+      if (request === previewRequest.current) setPreview(data);
     } catch (err) {
+      if (request !== previewRequest.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
       setPreview(null);
     } finally {
-      setLoadingPreview(false);
+      if (request === previewRequest.current) setLoadingPreview(false);
     }
-  }, [inputVal, t]);
+  }, [t]);
 
   const handlePaste = useCallback(async () => {
     try {
@@ -85,6 +101,9 @@ export function ImportLinkModal({
   }, [handleFetchPreview]);
 
   useEffect(() => {
+    if (!open || jobRef.current) return;
+    previewRequest.current += 1;
+    setLoadingPreview(false);
     if (initialUrl) {
       setInputVal(initialUrl);
       void handleFetchPreview(initialUrl);
@@ -97,13 +116,16 @@ export function ImportLinkModal({
 
   async function handleInstall() {
     const target = inputVal.trim();
-    if (!target) return;
+    if (!target || jobRef.current) return;
+    const requestId = crypto.randomUUID();
+    jobRef.current = requestId;
+    setProgress({ stage: "profile", progress: 0 });
     setInstalling(true);
     setError(null);
     try {
-      const result = await window.onyx.state.importSyncProfileUrl(target);
-      onSuccess(result.instance, result.installed, result.skipped);
-      onClose();
+      const result = await window.onyx.state.importSyncProfileUrl(target, requestId);
+      latest.current.onSuccess(result.instance, result.installed, result.skipped, latest.current.open);
+      latest.current.onClose();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
@@ -113,11 +135,17 @@ export function ImportLinkModal({
         msg,
       );
     } finally {
+      jobRef.current = null;
       setInstalling(false);
     }
   }
 
-  if (!open) return null;
+  if (!open) return installing ? (
+    <button className="background-import" onClick={onReopen}>
+      <Loader2 className="spin" size={16} />
+      <span>{t("import.background")} · {t(`import.stage.${progress.stage}`)} {progress.progress}%</span>
+    </button>
+  ) : null;
 
   return (
     <AnimatePresence>
@@ -127,17 +155,22 @@ export function ImportLinkModal({
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !installing) onClose();
+          if (event.target === event.currentTarget) onClose();
         }}
       >
         <motion.div
           className="modal create-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="import-link-title"
+          tabIndex={-1}
           initial={{ opacity: 0, scale: 0.96, y: 16 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.97, y: 10 }}
           transition={{ type: "spring", stiffness: 420, damping: 34 }}
         >
-          {!installing && (
+          {(
             <button
               className="modal__close"
               onClick={onClose}
@@ -152,7 +185,7 @@ export function ImportLinkModal({
             <span>{isRu ? "ИМПОРТ СБОРКИ" : "IMPORT MODPACK"}</span>
           </div>
 
-          <h2>{isRu ? "Скачать по ссылке" : "Download Shared Modpack"}</h2>
+          <h2 id="import-link-title">{isRu ? "Скачать по ссылке" : "Download Shared Modpack"}</h2>
           <p className="modal__subtitle">
             {isRu
               ? "Вставь ссылку от друга или код сборки pk_... для автоматической загрузки."
@@ -164,13 +197,13 @@ export function ImportLinkModal({
             <div className="field__control" style={{ paddingRight: 4, gap: 6 }}>
               <Link2 size={16} />
               <input
-                autoFocus
                 placeholder="https://scope-hub.vercel.app/pack/pk_... или pk_..."
                 value={inputVal}
-                onChange={(e) => setInputVal(e.target.value)}
+                disabled={installing}
+                onChange={(e) => { previewRequest.current += 1; setLoadingPreview(false); setInputVal(e.target.value); setPreview(null); setError(null); }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !preview && !loadingPreview) {
-                    void handleFetchPreview();
+                    void handleFetchPreview(inputVal);
                   }
                 }}
                 style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}
@@ -178,28 +211,15 @@ export function ImportLinkModal({
               <button
                 type="button"
                 className="button button--secondary"
+                disabled={installing || loadingPreview}
+                aria-label={isRu ? "Вставить из буфера" : "Paste from clipboard"}
                 onClick={() => void handlePaste()}
                 title={isRu ? "Вставить из буфера" : "Paste from clipboard"}
                 style={{ height: 31, padding: "0 10px", fontSize: 12 }}
               >
                 <Clipboard size={14} />
               </button>
-              <button
-                type="button"
-                className="button button--secondary"
-                disabled={loadingPreview || !inputVal.trim()}
-                onClick={() => void handleFetchPreview()}
-                style={{ height: 31, padding: "0 12px", fontSize: 12 }}
-              >
-                {loadingPreview ? (
-                  <Loader2 size={14} className="spin" />
-                ) : (
-                  <>
-                    <span>{isRu ? "Найти" : "Inspect"}</span>
-                    <ArrowRight size={14} />
-                  </>
-                )}
-              </button>
+
             </div>
           </label>
 
@@ -259,14 +279,21 @@ export function ImportLinkModal({
             </div>
           )}
 
+          {installing && (
+            <div className="import-progress" role="status" aria-live="polite">
+              <strong>{t(`import.stage.${progress.stage}`)}</strong>
+              <progress max={100} value={progress.progress} aria-label={t(`import.stage.${progress.stage}`)} />
+              {progress.current && <span>{progress.current}</span>}
+              <p>{t("import.backgroundHint")}</p>
+            </div>
+          )}
           <div className="modal__footer">
             <button
               type="button"
               className="button button--ghost"
               onClick={onClose}
-              disabled={installing}
             >
-              {t("common.close")}
+              {t(installing ? "import.minimize" : "common.close")}
             </button>
 
             {preview ? (
@@ -293,7 +320,7 @@ export function ImportLinkModal({
                 type="button"
                 className="button button--primary"
                 disabled={loadingPreview || !inputVal.trim()}
-                onClick={() => void handleFetchPreview()}
+                onClick={() => void handleFetchPreview(inputVal)}
               >
                 {loadingPreview ? (
                   <Loader2 size={16} className="spin" />

@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Archive,
@@ -53,6 +54,8 @@ export function InstanceMenu({
   onUpdatePack,
 }: InstanceMenuProps) {
   const { t, locale } = useI18n();
+  const dialogRef = useDialogFocus(Boolean(instance), onClose);
+
   return (
     <AnimatePresence>
       {instance && (
@@ -67,6 +70,11 @@ export function InstanceMenu({
         >
           <motion.div
             className="modal instance-menu-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={instance?.name}
+          tabIndex={-1}
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 8 }}

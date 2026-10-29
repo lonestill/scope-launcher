@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { AnimatePresence, motion } from "framer-motion";
 import { Box, ChevronRight, PackagePlus, X } from "lucide-react";
 import { useI18n } from "../i18n";
@@ -17,15 +17,10 @@ export function TargetInstanceModal({
   onSelect: (instance: GameInstance) => void;
 }) {
   const { t } = useI18n();
+  const dialogRef = useDialogFocus(Boolean(project), onClose);
 
-  useEffect(() => {
-    if (!project) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [project, onClose]);
+
+
   const isGenericContent =
     project?.project_type === "resourcepack" ||
     project?.project_type === "shader";
@@ -73,6 +68,11 @@ export function TargetInstanceModal({
         >
           <motion.div
             className="modal target-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={project?.title}
+          tabIndex={-1}
             initial={{ opacity: 0, scale: 0.97, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.98, y: 8 }}

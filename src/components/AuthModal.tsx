@@ -14,6 +14,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useI18n } from "../i18n";
 import type { AuthLogin, Profile } from "../types";
 
@@ -72,11 +73,6 @@ export function AuthModal({
       return;
     }
     void refreshAccounts();
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, onClose]);
 
   const begin = async () => {
@@ -212,6 +208,8 @@ export function AuthModal({
     profile.skins?.find((skin) => skin.state === "ACTIVE") ||
     profile.skins?.[0];
 
+  const dialogRef = useDialogFocus(open, close);
+
   return (
     <AnimatePresence>
       {open && (
@@ -226,6 +224,11 @@ export function AuthModal({
         >
           <motion.div
             className="modal auth-modal"
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("settings.nav.account")}
+            tabIndex={-1}
             initial={{ opacity: 0, scale: 0.96, y: 14 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 8 }}

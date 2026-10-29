@@ -5,6 +5,18 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 const zlib = require("node:zlib");
+const { ZipArchive } = require("archiver");
+async function writeModJar(file, modId, entries = {}) {
+  const archive = new ZipArchive();
+  const output = fs.createWriteStream(file);
+  const done = new Promise((resolve, reject) => { output.on("close", resolve); output.on("error", reject); archive.on("error", reject); });
+  archive.pipe(output);
+  archive.append(JSON.stringify({ id: modId, version: "1.0" }), { name: "fabric.mod.json" });
+  for (const [name, contents] of Object.entries(entries)) archive.append(contents, { name });
+  await archive.finalize();
+  await done;
+}
+
 const {
   detectCrashAutoFix,
   applyCrashAutoFix,
@@ -310,8 +322,8 @@ test("detectCrashAutoFix: detects duplicate mod files and disables the duplicate
 
   const originalJar = "jei-1.20.1-15.2.0.27.jar";
   const duplicateJar = "jei-1.20.1-15.2.0.27 (1).jar";
-  await fsp.writeFile(path.join(modsDir, originalJar), "dummy-jei");
-  await fsp.writeFile(path.join(modsDir, duplicateJar), "dummy-jei-copy");
+  await writeModJar(path.join(modsDir, originalJar), "jei");
+  await writeModJar(path.join(modsDir, duplicateJar), "jei");
 
   const instance = { id: instId };
   const logContent = `
@@ -346,7 +358,8 @@ test("detectCrashAutoFix & apply: disable-active-shaderpack", async () => {
   const instId = "inst-shader";
   const instDir = path.join(tmpRoot, instId);
   await fsp.mkdir(instDir, { recursive: true });
-  await fsp.writeFile(path.join(instDir, "optionsiris.txt"), "shaderPack=ComplementaryReimagined.zip\n");
+  await fsp.mkdir(path.join(instDir, "config"));
+  await fsp.writeFile(path.join(instDir, "config/iris.properties"), "enableShaders=true\nshaderPack=ComplementaryReimagined.zip\n");
 
   const instance = { id: instId };
   const logContent = "Composite shader error: Program link failed during iris pipeline compile";
@@ -357,8 +370,9 @@ test("detectCrashAutoFix & apply: disable-active-shaderpack", async () => {
 
   const result = await applyCrashAutoFix({ fixAction: fix, instance, instancesRoot: tmpRoot });
   assert.equal(result.success, true);
-  const updated = await fsp.readFile(path.join(instDir, "optionsiris.txt"), "utf8");
-  assert.ok(updated.includes("shaderPack=OFF"));
+  const updated = await fsp.readFile(path.join(instDir, "config/iris.properties"), "utf8");
+  assert.ok(updated.includes("enableShaders=false"));
+  assert.ok(updated.includes("shaderPack=ComplementaryReimagined.zip"));
 
   await fsp.rm(tmpRoot, { recursive: true, force: true });
 });
@@ -368,25 +382,17 @@ test("detectCrashAutoFix & apply: repair-opengl-context", async () => {
   const logContent = "GLFW error 65542: The driver does not appear to support OpenGL";
   const fix = await detectCrashAutoFix({ instance, logContent });
 
-  assert.ok(fix);
-  assert.equal(fix.type, "repair-opengl-context");
-
-  const result = await applyCrashAutoFix({ fixAction: fix, instance });
-  assert.equal(result.success, true);
-  assert.ok(instance.settings.jvmArguments.includes("-Dsun.java2d.opengl=false"));
+  assert.equal(fix, null);
+  await assert.rejects(applyCrashAutoFix({ instance, fixAction: { type: "repair-opengl-context", payload: {} } }), /manually/);
 });
 
 test("detectCrashAutoFix & apply: apply-wayland-fix", async () => {
   const instance = { id: "inst-wayland", settings: { jvmArguments: [] } };
   const logContent = "GLFW error 65543: GLX: Failed to create context on Wayland";
-  const fix = await detectCrashAutoFix({ instance, logContent });
+  const fix = await detectCrashAutoFix({ instance, logContent, platform: "linux" });
 
-  assert.ok(fix);
-  assert.equal(fix.type, "apply-wayland-fix");
-
-  const result = await applyCrashAutoFix({ fixAction: fix, instance });
-  assert.equal(result.success, true);
-  assert.ok(instance.settings.jvmArguments.includes("-Dorg.lwjgl.glfw.libname=libglfw.so.3"));
+  assert.equal(fix, null);
+  await assert.rejects(applyCrashAutoFix({ instance, fixAction: { type: "apply-wayland-fix", payload: {} } }), /manually/);
 });
 
 test("detectCrashAutoFix & apply: reset-video-options", async () => {
@@ -443,9 +449,14 @@ test("detectCrashAutoFix & apply: upgrade-loader-version", async () => {
   assert.equal(fix.type, "upgrade-loader-version");
   assert.equal(fix.payload.requiredVersion, "0.16.5");
 
-  const result = await applyCrashAutoFix({ fixAction: fix, instance });
+  const result = await applyCrashAutoFix({ fixAction: fix, instance,
+    repairInstanceFn: async (target) => {
+      assert.equal(target.installProfile.loaderVersion, "0.16.5");
+      target.resolvedVersionId = "fabric-loader-0.16.5-1.20.1";
+    },
+  });
   assert.equal(result.success, true);
-  assert.equal(instance.settings.pendingLoaderUpgrade, true);
+  assert.equal(instance.loaderVersion, "0.16.5");
 });
 
 test("detectCrashAutoFix & apply: inject-java-module-flags", async () => {
@@ -467,19 +478,20 @@ test("detectCrashAutoFix & apply: enable-forge-entity-removal", async () => {
   const cfgDir = path.join(tmpRoot, instId, "config");
   await fsp.mkdir(cfgDir, { recursive: true });
 
+  await fsp.writeFile(path.join(cfgDir, "forge.cfg"), "general {\nB:removeErroringEntities=false\nB:removeErroringTileEntities=false\n}\n");
   const instance = { id: instId, loader: "forge" };
   const logContent = "java.lang.NullPointerException: Ticking entity at chunk (12, -4)";
-  const fix = await detectCrashAutoFix({ instance, logContent });
+  const fix = await detectCrashAutoFix({ instance, logContent, instancesRoot: tmpRoot });
 
   assert.ok(fix);
   assert.equal(fix.type, "enable-forge-entity-removal");
 
   const result = await applyCrashAutoFix({ fixAction: fix, instance, instancesRoot: tmpRoot });
   assert.equal(result.success, true);
-  const tomlPath = path.join(cfgDir, "forge-common.toml");
+  const tomlPath = path.join(cfgDir, "forge.cfg");
   assert.ok(fs.existsSync(tomlPath));
   const content = await fsp.readFile(tomlPath, "utf8");
-  assert.ok(content.includes("removeErroringEntities = true"));
+  assert.ok(content.includes("B:removeErroringEntities=true"));
 
   await fsp.rm(tmpRoot, { recursive: true, force: true });
 });
@@ -509,7 +521,7 @@ test("detectCrashAutoFix & apply: quarantine-playerdata", async () => {
   await fsp.rm(tmpRoot, { recursive: true, force: true });
 });
 
-test("detectCrashAutoFix & apply: kill-zombie-process removes orphan session.lock", async () => {
+test("detectCrashAutoFix refuses automatic deletion of session locks", async () => {
   const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "scope-fix-zombie-"));
   const instId = "inst-zombie";
   const instDir = path.join(tmpRoot, instId);
@@ -521,13 +533,9 @@ test("detectCrashAutoFix & apply: kill-zombie-process removes orphan session.loc
   const logContent = "java.nio.file.AccessDeniedException: session.lock is locked by another process";
   const fix = await detectCrashAutoFix({ instance, logContent });
 
-  assert.ok(fix);
-  assert.equal(fix.type, "kill-zombie-process");
-
-  const result = await applyCrashAutoFix({ fixAction: fix, instance, instancesRoot: tmpRoot });
-  assert.equal(result.success, true);
-  assert.equal(fs.existsSync(lockFile), false);
-  assert.equal(instance.settings.zombieProcessDetected, true);
+  assert.equal(fix, null);
+  await assert.rejects(applyCrashAutoFix({ fixAction: { type: "kill-zombie-process" }, instance, instancesRoot: tmpRoot }), /automatic lock deletion is disabled/);
+  assert.equal(await fsp.readFile(lockFile, "utf8"), "lock");
 
   await fsp.rm(tmpRoot, { recursive: true, force: true });
 });
@@ -574,7 +582,7 @@ test("detectCrashAutoFix & apply: restore-corrupted-level-dat", async () => {
 
   const result = await applyCrashAutoFix({ fixAction: fix, instance, instancesRoot: tmpRoot });
   assert.equal(result.success, true);
-  assert.ok(fs.existsSync(path.join(wDir, "level.dat.corrupt")));
+  assert.ok((await fsp.readdir(wDir)).some((name) => name.startsWith("level.dat.corrupt-")));
   const restored = await fsp.readFile(path.join(wDir, "level.dat"), "utf8");
   assert.equal(restored, "good-nbt-backup");
 
@@ -586,11 +594,11 @@ test("detectCrashAutoFix & apply: resolve-mixin-overwrite", async () => {
   const instId = "inst-mix";
   const modsDir = path.join(tmpRoot, instId, "mods");
   await fsp.mkdir(modsDir, { recursive: true });
-  await fsp.writeFile(path.join(modsDir, "badrender-1.0.jar"), "dummy");
+  await writeModJar(path.join(modsDir, "badrender-1.0.jar"), "badrender", { "badrender.mixins.json": "{}" });
 
   const instance = { id: instId };
   const logContent = "org.spongepowered.asm.mixin.transformer.throwables.MixinTransformerError: Critical injection failure: Cannot apply @Overwrite on target in badrender.mixins.json";
-  const fix = await detectCrashAutoFix({ instance, logContent });
+  const fix = await detectCrashAutoFix({ instance, logContent, instancesRoot: tmpRoot });
 
   assert.ok(fix);
   assert.equal(fix.type, "resolve-mixin-overwrite");
@@ -695,12 +703,8 @@ test("detectCrashAutoFix & apply: suppress-gpu-hooks", async () => {
   const logContent = "# Problematic frame: C [nvoglv64.dll+0x91834] EXCEPTION_ACCESS_VIOLATION (0xc0000005)";
   const fix = await detectCrashAutoFix({ instance, logContent });
 
-  assert.ok(fix);
-  assert.equal(fix.type, "suppress-gpu-hooks");
-
-  const result = await applyCrashAutoFix({ fixAction: fix, instance });
-  assert.equal(result.success, true);
-  assert.ok(instance.settings.jvmArguments.some((f) => f.includes("Display.allowSoftwareOpenGL")));
+  assert.equal(fix, null);
+  await assert.rejects(applyCrashAutoFix({ instance, fixAction: { type: "suppress-gpu-hooks", payload: {} } }), /manually/);
 });
 
 test("detectCrashAutoFix & apply: force-switch-64bit-java", async () => {
@@ -708,13 +712,8 @@ test("detectCrashAutoFix & apply: force-switch-64bit-java", async () => {
   const logContent = "Error: Could not reserve enough space for 3145728KB object heap on 32-Bit Server VM";
   const fix = await detectCrashAutoFix({ instance, logContent });
 
-  assert.ok(fix);
-  assert.equal(fix.type, "force-switch-64bit-java");
+  assert.equal(fix, null);
 
-  const result = await applyCrashAutoFix({ fixAction: fix, instance });
-  assert.equal(result.success, true);
-  assert.equal(instance.settings.javaPath, "");
-  assert.equal(instance.javaArch, "x64");
 });
 
 test("detectCrashAutoFix & apply: install-qsl-library", async () => {
@@ -737,25 +736,24 @@ test("detectCrashAutoFix & apply: install-qsl-library", async () => {
   assert.equal(installed, "qsl");
 });
 
-test("detectCrashAutoFix & apply: purge-corrupted-natives", async () => {
+test("detectCrashAutoFix & apply: purge-corrupted-natives rebuilds shared natives", async () => {
   const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "scope-fix-nat-"));
-  const instId = "inst-nat";
-  const nativesDir = path.join(tmpRoot, instId, "natives");
-  await fsp.mkdir(nativesDir, { recursive: true });
-  await fsp.writeFile(path.join(nativesDir, "corrupted.dll"), "bad");
+  try {
+    const { MinecraftService } = require("../electron/services/minecraft.cjs");
+    const service = new MinecraftService({ sharedRoot: path.join(tmpRoot, "shared"), instancesRoot: tmpRoot });
+    service.loadResolvedVersion = async () => ({ inheritsFrom: "1.20.1" });
+    const directory = path.join(tmpRoot, "shared/natives/1.20.1");
+    await fsp.mkdir(directory, { recursive: true });
+    await fsp.writeFile(path.join(directory, "damaged.dll"), "old");
+    service.installVanilla = async (id) => { assert.equal(id, "1.20.1"); await fsp.mkdir(directory, { recursive: true }); await fsp.writeFile(path.join(directory, "repaired.dll"), "good"); };
+    const instance = { id: "inst-nat", version: "1.20.1", resolvedVersionId: "fabric-version" };
+    const fix = await detectCrashAutoFix({ instance, logContent: "java.lang.UnsatisfiedLinkError: Could not load library: lwjgl" });
+    assert.equal(fix.type, "purge-corrupted-natives");
+    const result = await applyCrashAutoFix({ instance, fixAction: fix, repairNativesFn: () => service.repairNatives(instance) });
+    assert.equal(result.success, true);
+    assert.deepEqual(await fsp.readdir(directory), ["repaired.dll"]);
+  } finally { await fsp.rm(tmpRoot, { recursive: true, force: true }); }
 
-  const instance = { id: instId };
-  const logContent = "java.lang.UnsatisfiedLinkError: Could not load library: lwjgl";
-  const fix = await detectCrashAutoFix({ instance, logContent });
-
-  assert.ok(fix);
-  assert.equal(fix.type, "purge-corrupted-natives");
-
-  const result = await applyCrashAutoFix({ fixAction: fix, instance, instancesRoot: tmpRoot });
-  assert.equal(result.success, true);
-  assert.equal(fs.existsSync(nativesDir), false);
-
-  await fsp.rm(tmpRoot, { recursive: true, force: true });
 });
 
 test("detectCrashAutoFix & apply: allow-security-manager-flag", async () => {
@@ -836,7 +834,7 @@ com.google.gson.JsonSyntaxException: java.io.EOFException: End of input at line 
   const result = await applyCrashAutoFix({ fixAction: fix, instance, instancesRoot: tmpRoot });
   assert.equal(result.success, true);
   assert.equal(fs.existsSync(path.join(instDir, "usercache.json")), false);
-  assert.equal(fs.existsSync(path.join(instDir, "realms_persistence.json")), false);
+  assert.equal(await fsp.readFile(path.join(instDir, "realms_persistence.json"), "utf8"), "{corrupt realms");
 
   await fsp.rm(tmpRoot, { recursive: true, force: true });
 });

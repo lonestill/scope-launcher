@@ -1,6 +1,8 @@
 const fsp = require("node:fs/promises");
+const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { promoteInstanceUpdate } = require("./instance-update.cjs");
 const {
   fetchJson,
   downloadFile,
@@ -131,6 +133,7 @@ class ModpackService {
     const destination = path.join(
       this.packsRoot,
       project.project_id,
+      release.id.replace(/[^a-zA-Z0-9_-]/g, "_"),
       safeName,
     );
     await downloadFile({
@@ -180,6 +183,8 @@ class ModpackService {
           const result = await curseforgeService.installCurseForgeModpack({
             instancesRoot: this.instancesRoot,
             archivePath: packPath,
+            instanceId,
+            signal,
             packName: manifest.name,
             onProgress: (p) => {
               onProgress?.({
@@ -193,8 +198,9 @@ class ModpackService {
           });
           return result.metadata;
         }
-      } catch {
-        // Fall through to error below
+      } catch (error) {
+        if (signal?.aborted || error?.name === "AbortError") throw error;
+        if (error.message !== "Entry not found") throw error;
       }
       throw new Error(
         "Unsupported modpack format: neither modrinth.index.json nor manifest.json found",
@@ -445,48 +451,63 @@ class ModpackService {
       .map((file) => file.path.replaceAll("\\", "/"))
       .filter((filePath) => !nextPaths.has(filePath));
     const instanceDirectory = path.join(this.instancesRoot, instance.id);
-    const historyRoot = path.join(
-      instanceDirectory,
-      ".onyx",
-      "history",
-      `pack-${new Date().toISOString().replace(/[:.]/g, "-")}`,
-    );
-    for (const relative of obsolete) {
-      const source = safeDestination(instanceDirectory, relative);
-      const stat = await fsp.stat(source).catch(() => null);
-      if (!stat?.isFile()) continue;
-      const destination = safeDestination(historyRoot, relative);
-      await fsp.mkdir(path.dirname(destination), { recursive: true });
-      await fsp.rename(source, destination);
-    }
+    const stagingId = `_update-${crypto.randomUUID()}`;
+    const stagingDirectory = path.join(this.instancesRoot, stagingId);
+    let installed;
+    try {
+      await fsp.cp(instanceDirectory, stagingDirectory, { recursive: true, mode: fs.constants.COPYFILE_FICLONE });
+      signal?.throwIfAborted();
+      const historyRoot = path.join(
+        stagingDirectory,
+        ".onyx",
+        "history",
+        `pack-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+      );
+      for (const relative of obsolete) {
+        const source = safeDestination(stagingDirectory, relative);
+        const stat = await fsp.stat(source).catch(() => null);
+        if (!stat?.isFile()) continue;
+        const destination = safeDestination(historyRoot, relative);
+        await fsp.mkdir(path.dirname(destination), { recursive: true });
+        await fsp.rename(source, destination);
+      }
 
-    const installed = await this.installPack({
-      packPath,
-      project: {
-        ...project,
-        project_id: instance.sourceProjectId,
-        versionId: release.id,
-      },
-      settings,
-      instanceId: instance.id,
-      onProgress,
-      signal,
-    });
+      installed = await this.installPack({
+        packPath,
+        project: {
+          ...project,
+          project_id: instance.sourceProjectId,
+          versionId: release.id,
+        },
+        settings,
+        instanceId: stagingId,
+        onProgress,
+        signal,
+      });
+      signal?.throwIfAborted();
+    } catch (error) {
+      await fsp.rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+    const nextInstance = {
+      ...instance,
+      ...installed,
+      id: instance.id,
+      favorite: instance.favorite,
+      playtimeMinutes: instance.playtimeMinutes,
+      lastPlayed: instance.lastPlayed,
+      settings: instance.settings,
+      loaderVersion: installed.installProfile?.loaderVersion,
+      sourceProjectId: instance.sourceProjectId,
+      sourceVersionId: release.id,
+      packVersion: nextIndex.versionId,
+      updateAvailable: null,
+    };
+    const transaction = await promoteInstanceUpdate({ instancesRoot: this.instancesRoot, instanceId: instance.id, stagingId, nextInstance, signal });
     return {
       updated: true,
-      instance: {
-        ...instance,
-        ...installed,
-        id: instance.id,
-        favorite: instance.favorite,
-        playtimeMinutes: instance.playtimeMinutes,
-        lastPlayed: instance.lastPlayed,
-        settings: instance.settings,
-        sourceProjectId: instance.sourceProjectId,
-        sourceVersionId: release.id,
-        packVersion: nextIndex.versionId,
-        updateAvailable: null,
-      },
+      instance: nextInstance,
+      ...transaction,
       release,
       obsoleteFiles: obsolete.length,
     };

@@ -350,12 +350,7 @@ export function HomePage({
             <h2>{t("home.recent")}</h2>
             <p>{t("home.recentHint")}</p>
           </div>
-          <button
-            className="text-button"
-            onClick={() => onNavigate("library")}
-          >
-            {t("home.library")} <ArrowRight size={13} />
-          </button>
+
         </div>
 
         <div className="recent-grid">
@@ -397,7 +392,7 @@ export function HomePage({
                 </span>
                 <button
                   className="recent-card__play"
-                  aria-label={t("home.action.play")}
+                  aria-label={instance.status === "setup" || instance.status === "pack-ready" ? t("home.action.install") : t("home.action.play")}
                   onClick={(event) => {
                     event.stopPropagation();
                     onPlay(instance);
@@ -409,21 +404,13 @@ export function HomePage({
             );
           })}
 
-          <button className="recent-card recent-card--new" onClick={onCreate}>
-            <span className="recent-card__icon">
-              <Plus size={18} />
-            </span>
-            <span className="recent-card__copy">
-              <strong>{t("home.newInstance")}</strong>
-              <small>{t("home.newHint")}</small>
-            </span>
-          </button>
+
         </div>
       </section>
 
       <section className="ops-grid ops-grid--single">
-        <div className="ops-card ops-card--server">
-          <div className="ops-card__head">
+        <details className="ops-card ops-card--server server-disclosure">
+          <summary className="ops-card__head">
             <div className="ops-card__icon">
               <Radio size={16} />
             </div>
@@ -431,7 +418,7 @@ export function HomePage({
               <strong>{t("home.quickJoin.title")}</strong>
               <span>{t("home.quickJoin.subtitle")}</span>
             </div>
-          </div>
+          </summary>
           <div className="ops-card__body">
             <div className="quick-join-form">
               <div className="quick-join-input-shell">
@@ -482,7 +469,7 @@ export function HomePage({
               </button>
             </div>
           </div>
-        </div>
+        </details>
       </section>
     </motion.div>
   );

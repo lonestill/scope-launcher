@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -305,6 +306,8 @@ export function ProjectDetailModal({
   targetInstanceId = null,
 }: ProjectDetailModalProps) {
   const { locale, t } = useI18n();
+  const dialogRef = useDialogFocus(Boolean(project), onClose);
+
 
   const [activeTab, setActiveTab] = useState<"overview" | "versions">("overview");
   const [description, setDescription] = useState<string>("");
@@ -340,14 +343,7 @@ export function ProjectDetailModal({
   const [loadingPreview, setLoadingPreview] = useState(false);
 
   // Close on Escape key
-  useEffect(() => {
-    if (!project) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [project, onClose]);
+
 
   // Reset tab, preview and active index on project change
   useEffect(() => {
@@ -744,6 +740,11 @@ export function ProjectDetailModal({
       >
         <motion.div
           className="modal project-detail-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={project?.title}
+          tabIndex={-1}
           initial={{ opacity: 0, scale: 0.96, y: 16 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.97, y: 10 }}

@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -57,6 +58,8 @@ export function MigrationModal({ open, onClose, onSuccess }: MigrationModalProps
   const [progress, setProgress] = useState<MigrationProgress | null>(null);
   const [result, setResult] = useState<MigrationResult | null>(null);
 
+
+  const dialogRef = useDialogFocus(open, importing ? undefined : onClose);
   // Scan installed launchers when modal opens
   useEffect(() => {
     if (!open) {
@@ -324,6 +327,11 @@ export function MigrationModal({ open, onClose, onSuccess }: MigrationModalProps
         >
           <motion.div
             className="modal migration-modal"
+          ref={dialogRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("migration.title")}
+          tabIndex={-1}
             initial={{ opacity: 0, scale: 0.96, y: 16 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 10 }}

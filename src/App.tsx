@@ -96,6 +96,7 @@ export default function App() {
   const [versions, setVersions] = useState<MinecraftVersion[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [migrationOpen, setMigrationOpen] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState<{ query: string; type: "mod" | "modpack"; id: number } | null>(null);
   const [commandOpen, setCommandOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
   const [instanceMenu, setInstanceMenu] = useState<GameInstance | null>(null);
@@ -165,6 +166,11 @@ export default function App() {
     setState(next);
     return next;
   }, []);
+
+  const notify = useCallback((tone: ToastMessage["tone"], title: string, message: string) => {
+    pushToast(tone, title, message, 6200);
+  }, [pushToast]);
+  const handleChanged = useCallback(() => { void refreshState(); }, [refreshState]);
 
   useEffect(() => {
     window.onyx?.rpc?.setPage?.(route).catch(() => {});
@@ -429,16 +435,19 @@ export default function App() {
       },
     );
 
+    const pendingLogs = new Map<string, string>();
     const removeLog = window.onyx.onLauncherLog((log) => {
-      setActiveLaunch((current) => {
-        if (!current || current.instance.id !== log.instanceId) return current;
-        return {
-          ...current,
-          mode: "running",
-          logs: `${current.logs}${log.text}`.slice(-12_000),
-        };
-      });
+      pendingLogs.set(log.instanceId, `${pendingLogs.get(log.instanceId) || ""}${log.text}`.slice(-12_000));
     });
+    const logTimer = window.setInterval(() => {
+      if (!pendingLogs.size) return;
+      const logs = new Map(pendingLogs);
+      pendingLogs.clear();
+      setActiveLaunch((current) => {
+        if (!current || !logs.has(current.instance.id)) return current;
+        return { ...current, logs: `${current.logs}${logs.get(current.instance.id)}`.slice(-12_000) };
+      });
+    }, 100);
 
     const removeAuth = window.onyx.onAuthChanged((profile) => {
       setState((current) => (current ? { ...current, profile } : current));
@@ -473,6 +482,7 @@ export default function App() {
       removeSession();
       removeProgress();
       removeLog();
+      window.clearInterval(logTimer);
       removeAuth();
       removeMaintenance();
       if (typeof removeUpdater === "function") removeUpdater();
@@ -1137,8 +1147,15 @@ export default function App() {
     setRoute("settings");
   }
 
-  function requestAutoFix(instance: GameInstance, fix: CrashAutoFix) {
-    setPendingAutoFix({ instance, fix });
+  async function requestAutoFix(instance: GameInstance, _fix: CrashAutoFix) {
+    try {
+      const fix = await window.onyx.crash.detectAutoFix(instance.id);
+      await refreshState();
+      if (fix) setPendingAutoFix({ instance, fix });
+      else pushToast("info", t("crash.autofix.noChange.title"), t("crash.autofix.noChange.desc"));
+    } catch (error) {
+      pushToast("warning", t("crash.autofix.failed"), error instanceof Error ? error.message : t("crash.autofix.failed"));
+    }
   }
 
   async function confirmApplyAutoFix(instance: GameInstance, fix: CrashAutoFix) {
@@ -1151,10 +1168,12 @@ export default function App() {
         pushToast(
           "success",
           t("crash.autofix.applied"),
-          t("crash.autofix.appliedDesc"),
+          t(fix.type === "clean-corrupted-file" ? "crash.autofix.quarantinedDesc" : "crash.autofix.appliedDesc"),
           6000,
         );
         await refreshState();
+      } else {
+        pushToast("warning", t("crash.autofix.noChange.title"), t("crash.autofix.noChange.desc"));
       }
     } catch (error) {
       pushToast(
@@ -1313,16 +1332,17 @@ export default function App() {
               setRoute("discover");
             }}
             onUpdate={updateInstanceRecord}
-            onChanged={() => void refreshState()}
-            onNotify={(tone, title, message) =>
-              pushToast(tone, title, message, 6200)
-            }
+            onChanged={handleChanged}
+            onNotify={notify}
           />
         );
       }
       case "discover":
         return (
           <DiscoverPage
+            key={catalogSearch?.id ?? "catalog"}
+            initialQuery={catalogSearch?.query}
+            initialProjectType={catalogSearch?.type}
             downloads={state.downloads}
             instances={state.instances}
             versions={versions}
@@ -1355,9 +1375,7 @@ export default function App() {
             onUpdate={updateSettings}
             onMoveDirectory={moveGameDirectory}
             onAccount={() => setAccountOpen(true)}
-            onNotify={(tone, title, message) =>
-              pushToast(tone, title, message, 6200)
-            }
+            onNotify={notify}
           />
         );
       case "skins":
@@ -1366,18 +1384,14 @@ export default function App() {
             profile={state.profile}
             instances={state.instances}
             onAccount={() => setAccountOpen(true)}
-            onNotify={(tone, title, message) =>
-              pushToast(tone, title, message, 6200)
-            }
+            onNotify={notify}
           />
         );
       case "community":
         return (
           <CommunityPage
             settings={state.settings}
-            onNotify={(tone, title, message) =>
-              pushToast(tone, title, message, 6200)
-            }
+            onNotify={notify}
           />
         );
       default:
@@ -1451,6 +1465,7 @@ export default function App() {
         onClose={() => setCreateOpen(false)}
         onCreate={createInstance}
         availableVersions={versions}
+        onRefreshVersions={async () => { setVersions(await window.onyx.minecraft.versions()); }}
       />
       <MigrationModal
         open={migrationOpen}
@@ -1465,6 +1480,10 @@ export default function App() {
         }}
       />
       <CommandPalette
+        onSearchCatalog={(query, type) => {
+          setCatalogSearch({ query, type, id: Date.now() });
+          setRoute("discover");
+        }}
         open={commandOpen}
         instances={state.instances}
         onClose={() => setCommandOpen(false)}
@@ -1513,10 +1532,13 @@ export default function App() {
           setImportLinkOpen(false);
           setImportLinkInitialUrl(null);
         }}
-        onSuccess={(inst, installed, skipped) => {
+        onReopen={() => setImportLinkOpen(true)}
+        onSuccess={(inst, installed, skipped, foreground) => {
           void refreshState();
-          setSelectedInstanceId(inst.id);
-          setRoute("instance");
+          if (foreground) {
+            setSelectedInstanceId(inst.id);
+            setRoute("instance");
+          }
           pushToast(
             skipped ? "warning" : "success",
             t("app.sync.imported", { name: inst.name }),
@@ -1552,10 +1574,8 @@ export default function App() {
       <ContentModal
         instance={contentInstance}
         onClose={() => setContentInstance(null)}
-        onChanged={() => void refreshState()}
-        onNotify={(tone, title, message) =>
-          pushToast(tone, title, message, 6200)
-        }
+        onChanged={handleChanged}
+        onNotify={notify}
       />
       <InstanceSettingsModal
         instance={settingsInstance}

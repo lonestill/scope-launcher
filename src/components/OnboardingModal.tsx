@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  AlertTriangle,
   ArrowRight,
   Check,
   ChevronLeft,
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 import { useI18n } from "../i18n";
 import type { Profile, SystemDiagnostics } from "../types";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { formatBytes } from "../utils";
 
 export function OnboardingModal({
@@ -37,18 +39,33 @@ export function OnboardingModal({
     null,
   );
   const [busy, setBusy] = useState(false);
+  const [checkState, setCheckState] = useState<"loading" | "error" | "done">("loading");
+  const checkRequest = useRef(0);
+  const dialogRef = useDialogFocus(open);
+  const loadDiagnostics = useCallback(async () => {
+    const request = ++checkRequest.current;
+    setCheckState("loading");
+    setDiagnostics(null);
+    try {
+      const result = await window.onyx.system.diagnostics();
+      if (request !== checkRequest.current) return;
+      setDiagnostics(result);
+      setCheckState("done");
+    } catch {
+      if (request === checkRequest.current) setCheckState("error");
+    }
+  }, []);
 
   useEffect(() => {
     if (!open) return;
     setStep(0);
-    void window.onyx.system
-      .diagnostics()
-      .then(setDiagnostics)
-      .catch(() => setDiagnostics(null));
-  }, [open]);
+    void loadDiagnostics();
+    return () => { checkRequest.current += 1; };
+  }, [open, loadDiagnostics]);
 
   const recommendedMemory = useMemo(() => {
-    const total = diagnostics?.system.totalMemory || 16 * 1024 ** 3;
+    if (!diagnostics) return 2;
+    const total = diagnostics.system.totalMemory;
     const gigabytes = total / 1024 ** 3;
     if (gigabytes < 8) return 3;
     if (gigabytes < 12) return 4;
@@ -70,6 +87,8 @@ export function OnboardingModal({
       {open && (
         <motion.div
           className="onboarding"
+          ref={dialogRef}
+          tabIndex={-1}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -150,8 +169,14 @@ export function OnboardingModal({
                 >
                   <p className="eyebrow">{t("onboarding.system.eyebrow")}</p>
                   <h1>{t("onboarding.system.title")}</h1>
-                  <p>{t("onboarding.system.description")}</p>
-                  {!diagnostics ? (
+                  <p>{t(diagnostics ? "onboarding.system.description" : "onboarding.system.pendingDescription")}</p>
+                  {checkState === "error" ? (
+                    <div className="onboarding-checking" role="alert">
+                      <AlertTriangle size={22} />
+                      <p>{t("onboarding.system.failed")}</p>
+                      <button className="button button--secondary" onClick={() => void loadDiagnostics()}>{t("onboarding.system.retry")}</button>
+                    </div>
+                  ) : !diagnostics ? (
                     <div className="onboarding-checking">
                       <LoaderCircle className="spin" size={22} />
                       {t("onboarding.system.checking")}
@@ -164,6 +189,7 @@ export function OnboardingModal({
                         subtitle={t("onboarding.system.memoryDetected", { memory: formatBytes(diagnostics.system.totalMemory, locale) })}
                       />
                       <SystemRow
+                        ok={Boolean(diagnostics.java)}
                         icon={Coffee}
                         title={
                           diagnostics.java
@@ -176,11 +202,13 @@ export function OnboardingModal({
                         }
                       />
                       <SystemRow
+                        ok={diagnostics.storage.disk.free >= 2 * 1024 ** 3}
                         icon={HardDrive}
                         title={t("onboarding.system.disk", { space: formatBytes(diagnostics.storage.disk.free, locale) })}
                         subtitle={t("onboarding.system.diskDetail")}
                       />
                       <SystemRow
+                        ok={diagnostics.endpoints.length > 0 && diagnostics.endpoints.every((item) => item.ok)}
                         icon={Wifi}
                         title={t("onboarding.system.services", { online: diagnostics.endpoints.filter((item) => item.ok).length, total: diagnostics.endpoints.length })}
                         subtitle={t("onboarding.system.serviceNames")}
@@ -282,10 +310,12 @@ function SystemRow({
   icon: Icon,
   title,
   subtitle,
+  ok = true,
 }: {
   icon: typeof Cpu;
   title: string;
   subtitle: string;
+  ok?: boolean;
 }) {
   return (
     <div className="onboarding-system__row">
@@ -296,7 +326,7 @@ function SystemRow({
         <strong>{title}</strong>
         <small>{subtitle}</small>
       </div>
-      <Check size={15} />
+      {ok ? <Check size={15} aria-label="OK" /> : <AlertTriangle size={15} />}
     </div>
   );
 }

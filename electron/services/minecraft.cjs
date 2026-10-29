@@ -6,6 +6,7 @@ const osInfo = require("node:os");
 const net = require("node:net");
 const { domainToASCII } = require("node:url");
 const { spawn } = require("node:child_process");
+const { finished } = require("node:stream/promises");
 const { version: ONYX_VERSION } = require("../../package.json");
 const {
   fetchJson,
@@ -819,25 +820,26 @@ class MinecraftService {
 
     const versionRoot = path.join(this.sharedRoot, "versions");
     const directories = await fsp.readdir(versionRoot, { withFileTypes: true });
-    const targetMatch = profile.loaderVersion
-      ? directories
-          .filter((entry) => entry.isDirectory())
-          .map((entry) => entry.name)
-          .find((name) => name.includes(profile.loaderVersion))
-      : null;
-    const match =
-      targetMatch ||
-      directories
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name)
-        .filter(
-          (name) =>
-            name.includes(profile.minecraftVersion) &&
-            name.toLowerCase().includes(loader) &&
-            (loader !== "forge" || !name.toLowerCase().includes("neoforge")),
-        )
-        .sort()
-        .at(-1);
+    const expected = loader === "neoforge"
+      ? `neoforge-${loaderVersion}`
+      : `${profile.minecraftVersion}-forge-${loaderVersion}`;
+    let match = directories.find((entry) => entry.isDirectory() && entry.name === expected)?.name;
+    if (!match) {
+      const coordinateName = loader === "forge"
+        ? `net.minecraftforge:forge:${coordinate}`
+        : `net.neoforged:neoforge:${coordinate}`;
+      for (const entry of directories) {
+        if (!entry.isDirectory()) continue;
+        try {
+          const metadata = JSON.parse(await fsp.readFile(path.join(versionRoot, entry.name, `${entry.name}.json`), "utf8"));
+          if (metadata.inheritsFrom === profile.minecraftVersion &&
+              metadata.libraries?.some((library) => library.name === coordinateName)) {
+            match = entry.name;
+            break;
+          }
+        } catch { /* Ignore unrelated incomplete profiles. */ }
+      }
+    }
     if (!match) throw new Error(`The ${loader} profile did not appear after installation`);
     return match;
   }
@@ -931,6 +933,30 @@ class MinecraftService {
       return mergeVersion(parent, current);
     };
     return load(versionId);
+  }
+
+  async repairNatives(instance) {
+    const version = await this.loadResolvedVersion(instance.resolvedVersionId || instance.version);
+    const versionId = version.inheritsFrom || version.jar || instance.version;
+    if (typeof versionId !== "string" || !/^[a-zA-Z0-9_.+-]+$/.test(versionId)) throw new Error("Invalid native library version");
+    const directory = path.join(this.sharedRoot, "natives", versionId);
+    const preserved = `${directory}.backup-${crypto.randomUUID()}`;
+    let moved = false;
+    try {
+      await fsp.rename(directory, preserved);
+      moved = true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    try {
+      await this.installVanilla(versionId);
+      if (!(await fsp.stat(directory)).isDirectory()) throw new Error("Native library rebuild was not verified");
+    } catch (error) {
+      await fsp.rm(directory, { recursive: true, force: true });
+      if (moved) await fsp.rename(preserved, directory);
+      throw error;
+    }
+    if (moved) await fsp.rm(preserved, { recursive: true, force: true });
   }
 
   async buildLaunch({
@@ -1136,7 +1162,11 @@ class MinecraftService {
 
     await fsp.mkdir(path.join(gameDirectory, "logs"), { recursive: true });
     const logPath = path.join(gameDirectory, "logs", logFileName || "scope-latest.log");
-    const logStream = fs.createWriteStream(logPath, { flags: "a" });
+    const logHandle = await fsp.open(logPath, "w");
+    const logStream = logHandle.createWriteStream();
+    logStream.on("error", (error) => {
+      onLog?.({ channel: "error", text: `Failed to write game log: ${error.message}\n`, logPath });
+    });
     logStream.write(
       `\n[${new Date().toISOString()}] Scope is launching ${versionId}\n`,
     );
@@ -1161,7 +1191,6 @@ class MinecraftService {
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, ...(launchWrapper?.env || {}) },
     });
-    onSpawn?.(child.pid);
     const handle = (channel) => (chunk) => {
       const text = chunk.toString();
       logStream.write(text);
@@ -1174,8 +1203,15 @@ class MinecraftService {
       logStream.end(
         `\n[${new Date().toISOString()}] Game exited with code ${code}\n`,
       );
-      onExit?.({ code, logPath });
+      void finished(logStream).catch(() => undefined)
+        .then(() => onExit?.({ code, logPath }))
+        .catch((error) => console.error("Game exit processing failed:", error));
     });
+    await new Promise((resolve, reject) => {
+      child.once("spawn", () => { child.off("error", reject); resolve(); });
+      child.once("error", reject);
+    });
+    onSpawn?.(child.pid);
     return {
       child,
       logPath,
