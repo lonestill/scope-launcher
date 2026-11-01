@@ -98,6 +98,8 @@ export const en = {
   "auth.error.start": "Could not start sign-in",
   "auth.error.switch": "Could not switch accounts",
   "auth.error.remove": "Could not remove account",
+  "auth.error.noLicense": "No Minecraft: Java Edition license was found on this account. Use \"Add offline\" to play without a license.",
+  "auth.error.noProfile": "A Minecraft profile has not been created yet. Open minecraft.net/profile to set your Java Edition username.",
   "auth.license": "LICENSE VERIFIED",
   "auth.connected": "Your Microsoft account is connected. Multiplayer, skins, and Realms are available when you launch the game.",
   "auth.savedAccounts": "SAVED ACCOUNTS",

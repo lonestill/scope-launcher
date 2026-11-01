@@ -20,7 +20,8 @@
     "dist:linux": "npm run build:renderer && electron-builder --linux AppImage --x64 --publish never",
     "package:linux:tar": "node scripts/package-linux-tar.cjs",
     "dist:linux:archive": "npm run build:renderer && electron-builder --linux dir --x64 --publish never && npm run package:linux:tar",
-    "dist:linux:all": "npm run build:renderer && electron-builder --linux AppImage --x64 --publish never && electron-builder --linux dir --x64 --publish never && npm run package:linux:tar",
+    "dist:linux:deb": "npm run build:renderer && electron-builder --linux deb --x64 --publish never",
+    "dist:linux:all": "npm run build:renderer && electron-builder --linux AppImage deb --x64 --publish never && electron-builder --linux dir --x64 --publish never && npm run package:linux:tar",
     "preview": "vite preview",
     "lint": "eslint .",
     "validate": "npm run typecheck && npm run lint && npm test",
@@ -110,8 +111,18 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
         }
       ]
+    },
+    "deb": {
+      "packageCategory": "games",
+      "priority": "optional"
     },
     "mac": {
       "icon": "build/icon.png",

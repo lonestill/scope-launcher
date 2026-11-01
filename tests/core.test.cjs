@@ -395,6 +395,66 @@ test("Microsoft OAuth uses the current Prism consumer flow", () => {
   });
 });
 
+test("exchangeMicrosoftToken throws clean error on missing Java license when profile returns 404", async () => {
+  const service = new AuthService(temporaryRoot);
+  service.postJson = async (url) => {
+    if (url.includes("user.auth.xboxlive.com")) return { Token: "mock-xbl-token" };
+    if (url.includes("xsts.auth.xboxlive.com")) {
+      return {
+        Token: "mock-xsts-token",
+        DisplayClaims: { xui: [{ uhs: "mock-uhs" }] },
+      };
+    }
+    if (url.includes("launcher/login")) return { access_token: "mock-mc-token" };
+    throw new Error(`Unexpected postJson URL: ${url}`);
+  };
+  service.fetchJson = async (url) => {
+    if (url.includes("entitlements/mcstore")) return { items: [] };
+    if (url.includes("minecraft/profile")) {
+      const err = new Error("The server returned 404: Not Found");
+      err.status = 404;
+      throw err;
+    }
+    throw new Error(`Unexpected fetchJson URL: ${url}`);
+  };
+
+  await assert.rejects(
+    service.exchangeMicrosoftToken({ access_token: "mock-ms-token" }),
+    /No Minecraft: Java Edition license was found on this account/,
+  );
+});
+
+test("exchangeMicrosoftToken throws clean error when license exists but profile is 404", async () => {
+  const service = new AuthService(temporaryRoot);
+  service.postJson = async (url) => {
+    if (url.includes("user.auth.xboxlive.com")) return { Token: "mock-xbl-token" };
+    if (url.includes("xsts.auth.xboxlive.com")) {
+      return {
+        Token: "mock-xsts-token",
+        DisplayClaims: { xui: [{ uhs: "mock-uhs" }] },
+      };
+    }
+    if (url.includes("launcher/login")) return { access_token: "mock-mc-token" };
+    throw new Error(`Unexpected postJson URL: ${url}`);
+  };
+  service.fetchJson = async (url) => {
+    if (url.includes("entitlements/mcstore")) {
+      return { items: [{ name: "game_minecraft" }] };
+    }
+    if (url.includes("minecraft/profile")) {
+      const err = new Error("The server returned 404: Not Found");
+      err.status = 404;
+      throw err;
+    }
+    throw new Error(`Unexpected fetchJson URL: ${url}`);
+  };
+
+  await assert.rejects(
+    service.exchangeMicrosoftToken({ access_token: "mock-ms-token" }),
+    /A Minecraft profile has not been created yet/,
+  );
+});
+
 test("Without a system keyring, the refresh token remains in memory only", async () => {
   const authRoot = path.join(temporaryRoot, "volatile-auth");
   const service = new AuthService(authRoot);

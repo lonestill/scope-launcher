@@ -106,12 +106,18 @@ test("selectAsset matches platform-appropriate assets", () => {
   assert.ok(linuxAsset);
   assert.equal(linuxAsset.name, "Onyx-Launcher-1.7.0.AppImage");
 
-  // Linux rejects .tar.gz when no .AppImage is present
+  // Linux rejects .tar.gz and .deb when no .AppImage is present
   const linuxTarOnly = selectAsset(
     [{ name: "Onyx-Launcher-1.7.0.tar.gz", browser_download_url: "url", size: 100 }],
     "linux"
   );
   assert.equal(linuxTarOnly, null);
+
+  const linuxDebOnly = selectAsset(
+    [{ name: "Scope-Launcher-2.0.11-amd64.deb", browser_download_url: "url", size: 100 }],
+    "linux"
+  );
+  assert.equal(linuxDebOnly, null);
 
   // Empty or non-matching assets
   assert.equal(selectAsset([], "win32"), null);

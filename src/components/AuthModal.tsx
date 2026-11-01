@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { useI18n } from "../i18n";
+import type { TranslationKey } from "../locales";
 import type { AuthLogin, Profile } from "../types";
 
 interface AuthModalProps {
@@ -48,6 +49,32 @@ export function AuthModal({
     const result = await window.onyx.auth.list();
     setAccounts(result.profiles);
     setPersistentStorage(result.storage.persistent);
+  };
+
+  const formatError = (raw: unknown, fallbackKey: TranslationKey): string => {
+    if (!(raw instanceof Error) && typeof raw !== "string") return t(fallbackKey);
+    const message = (raw instanceof Error ? raw.message : raw)
+      .replace(/^Error invoking remote method '[^']+':\s*/i, "")
+      .replace(/^Error:\s*/i, "")
+      .trim();
+
+    if (!message) return t(fallbackKey);
+
+    if (
+      message.includes("No Minecraft: Java Edition license was found") ||
+      message.includes("No Minecraft: Java Edition license")
+    ) {
+      return t("auth.error.noLicense");
+    }
+
+    if (
+      message.includes("A Minecraft profile has not been created yet") ||
+      message.includes("Minecraft profile was not found")
+    ) {
+      return t("auth.error.noProfile");
+    }
+
+    return message;
   };
 
   useEffect(() => {
@@ -92,21 +119,13 @@ export function AuthModal({
           setLogin(null);
         })
         .catch((reason: unknown) => {
-          setError(
-            reason instanceof Error
-              ? reason.message
-              : t("auth.error.finish"),
-          );
+          setError(formatError(reason, "auth.error.finish"));
           setLogin(null);
         })
         .finally(() => setBusy(false));
     } catch (reason) {
       setBusy(false);
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : t("auth.error.start"),
-      );
+      setError(formatError(reason, "auth.error.start"));
     }
   };
 
@@ -137,11 +156,7 @@ export function AuthModal({
       onChanged(next);
       await refreshAccounts();
     } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : t("auth.error.switch"),
-      );
+      setError(formatError(reason, "auth.error.switch"));
     } finally {
       setBusy(false);
     }
@@ -156,9 +171,7 @@ export function AuthModal({
       onChanged(next);
       await refreshAccounts();
     } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : t("auth.error.remove"),
-      );
+      setError(formatError(reason, "auth.error.remove"));
     } finally {
       setBusy(false);
     }
@@ -174,11 +187,7 @@ export function AuthModal({
       setAdding(null);
       setOfflineName("");
     } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : t("auth.error.start"),
-      );
+      setError(formatError(reason, "auth.error.start"));
     } finally {
       setBusy(false);
     }
@@ -194,11 +203,7 @@ export function AuthModal({
       onChanged(next);
       await refreshAccounts();
     } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : t("auth.error.finish"),
-      );
+      setError(formatError(reason, "auth.error.finish"));
     } finally {
       setSkinBusy(false);
     }

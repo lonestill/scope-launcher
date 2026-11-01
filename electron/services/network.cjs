@@ -104,11 +104,14 @@ async function fetchJson(url, options = {}) {
       payload?.message ||
       payload?.Message ||
       "";
-    throw new Error(
+    const error = new Error(
       `The server returned ${response.status}${
         message ? `: ${String(message).slice(0, 180)}` : ""
       }`,
     );
+    error.status = response.status;
+    error.statusCode = response.status;
+    throw error;
   }
   return payload;
 }

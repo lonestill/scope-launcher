@@ -100,6 +100,8 @@ export const ru: Record<TranslationKey, string> = {
   "auth.error.start": "Не удалось начать вход",
   "auth.error.switch": "Не удалось переключить аккаунт",
   "auth.error.remove": "Не удалось удалить аккаунт",
+  "auth.error.noLicense": "На этом аккаунте Microsoft не найдена лицензия Minecraft: Java Edition. Для игры без лицензии используйте «Добавить офлайн».",
+  "auth.error.noProfile": "Профиль Minecraft ещё не создан на сайте minecraft.net. Задайте имя профиля Java Edition на официальном сайте.",
   "auth.license": "ЛИЦЕНЗИЯ ПОДТВЕРЖДЕНА",
   "auth.connected": "Ваш аккаунт Microsoft подключён. Мультиплеер, скины и Realms будут доступны при запуске игры.",
   "auth.savedAccounts": "СОХРАНЁННЫЕ АККАУНТЫ",

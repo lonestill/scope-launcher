@@ -139,7 +139,7 @@ jobs:
 
       - name: Create Linux checksums
         working-directory: release
-        run: sha256sum --binary *.AppImage *.tar.gz > SHA256SUMS-linux.txt
+        run: sha256sum --binary *.AppImage *.deb *.tar.gz > SHA256SUMS-linux.txt
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
@@ -147,6 +147,7 @@ jobs:
           name: onyx-launcher-linux-x64
           path: |
             release/*.AppImage
+            release/*.deb
             release/*.tar.gz
             release/SHA256SUMS-linux.txt
           if-no-files-found: error

@@ -209,6 +209,10 @@ class AuthService {
     }
   }
 
+  async fetchJson(url, options) {
+    return fetchJson(url, options);
+  }
+
   async exchangeMicrosoftToken(msToken) {
     const xbox = await this.postJson(XBOX_AUTH, {
       Properties: {
@@ -245,18 +249,59 @@ class AuthService {
     const headers = {
       Authorization: `Bearer ${minecraft.access_token}`,
     };
-    const [entitlements, profile] = await Promise.all([
-      fetchJson(MC_ENTITLEMENTS, { headers }),
-      fetchJson(MC_PROFILE, { headers }),
+    const [entitlementsRes, profileRes] = await Promise.allSettled([
+      this.fetchJson(MC_ENTITLEMENTS, { headers }),
+      this.fetchJson(MC_PROFILE, { headers }),
     ]);
-    if (!Array.isArray(entitlements.items) || entitlements.items.length === 0) {
+
+    const entitlements =
+      entitlementsRes.status === "fulfilled" ? entitlementsRes.value : null;
+    const profile =
+      profileRes.status === "fulfilled" ? profileRes.value : null;
+    const profileError =
+      profileRes.status === "rejected" ? profileRes.reason : null;
+    const entitlementsError =
+      entitlementsRes.status === "rejected" ? entitlementsRes.reason : null;
+
+    const is404 = (err) =>
+      Boolean(
+        err &&
+          (String(err.message || "").includes("404") ||
+            err.code === 404 ||
+            err.status === 404),
+      );
+
+    const hasLicense =
+      Array.isArray(entitlements?.items) && entitlements.items.length > 0;
+
+    if (!hasLicense) {
+      if (
+        is404(profileError) ||
+        is404(entitlementsError) ||
+        (entitlements && !hasLicense)
+      ) {
+        throw new Error(
+          "No Minecraft: Java Edition license was found on this account. Use \"Add offline\" to play without a license.",
+        );
+      }
+      if (entitlementsError) {
+        throw entitlementsError;
+      }
       throw new Error(
-        "No Minecraft: Java Edition license was found on this account",
+        "No Minecraft: Java Edition license was found on this account. Use \"Add offline\" to play without a license.",
       );
     }
-    if (!profile.id || !profile.name) {
-      throw new Error("A Minecraft profile has not been created yet");
+
+    if (is404(profileError) || !profile?.id || !profile?.name) {
+      throw new Error(
+        "A Minecraft profile has not been created yet. Open minecraft.net/profile to set your Java Edition username.",
+      );
     }
+
+    if (profileError) {
+      throw profileError;
+    }
+
     return {
       profile: {
         name: profile.name,
@@ -396,10 +441,23 @@ class AuthService {
       throw new Error("Failed to refresh the Microsoft session");
     }
 
-    const remote = await fetchJson(MC_PROFILE, {
-      headers: { Authorization: `Bearer ${launchAccount.accessToken}` },
-    });
-    if (!remote.id || !remote.name) {
+    let remote;
+    try {
+      remote = await this.fetchJson(MC_PROFILE, {
+        headers: { Authorization: `Bearer ${launchAccount.accessToken}` },
+      });
+    } catch (error) {
+      if (
+        String(error?.message || "").includes("404") ||
+        error?.status === 404
+      ) {
+        throw new Error(
+          "A Minecraft profile was not found on this account. Make sure your account owns Minecraft and has a profile set up on minecraft.net",
+        );
+      }
+      throw error;
+    }
+    if (!remote?.id || !remote?.name) {
       throw new Error("Minecraft Services did not return a player profile");
     }
 
