@@ -3,7 +3,7 @@
   "version": "2.0.12",
   "private": true,
   "description": "A modern desktop launcher for Minecraft instances and modpacks.",
-  "author": "Scope Launcher contributors",
+  "author": "Scope Launcher contributors <contributors@scope-launcher.app>",
   "license": "MIT",
   "main": "electron/main.cjs",
   "type": "module",
@@ -101,6 +101,7 @@
       ]
     },
     "linux": {
+      "maintainer": "Scope Launcher contributors <contributors@scope-launcher.app>",
       "icon": "build/icon.png",
       "category": "Game",
       "executableName": "scope-launcher",
