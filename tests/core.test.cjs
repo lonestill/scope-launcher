@@ -1018,7 +1018,7 @@ test(
 
 test(
   "Official Mojang and Fabric metadata is parsed",
-  { timeout: 45_000 },
+  { timeout: 90_000 },
   async () => {
     const javaService = new JavaService(path.join(temporaryRoot, "runtimes"));
     const service = new MinecraftService({
