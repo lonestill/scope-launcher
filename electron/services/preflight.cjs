@@ -207,6 +207,7 @@ async function checkInstanceHealth({
       checks.push({
         code: "orphan-session-lock",
         status: "warning",
+        path: rootLock,
         action: "auto",
         message: "A session.lock file is present and may indicate a running or zombie game process",
         autoFix: {
@@ -252,6 +253,7 @@ async function checkInstanceHealth({
           checks.push({
             code: "options-corrupted-values",
             status: "warning",
+            path: optionsPath,
             action: "auto",
             message: "options.txt contains corrupted NaN values that will crash window creation",
             autoFix: {
@@ -279,6 +281,7 @@ async function checkInstanceHealth({
               checks.push({
                 code: "corrupted-world-level-dat",
                 status: "warning",
+                path: lvlDat,
                 action: "auto",
                 message: `World '${w}' has a truncated 0-byte level.dat with a recoverable backup`,
                 autoFix: {
@@ -311,6 +314,7 @@ async function checkInstanceHealth({
           checks.push({
             code: "stray-vanilla-jar-in-mods",
             status: "warning",
+            path: path.join(modsDir, strayGameJar),
             action: "auto",
             message: `Stray Minecraft game JAR "${strayGameJar}" detected in mods folder (causes JPMS ResolutionException)`,
             autoFix: {
@@ -367,6 +371,7 @@ async function checkInstanceHealth({
         checks.push({
           code: "corrupted-usercache",
           status: "warning",
+          path: usercacheFile,
           action: "auto",
           message: "usercache.json is corrupted or truncated (causes JsonSyntaxException during startup)",
           autoFix: {
@@ -403,6 +408,7 @@ async function checkInstanceHealth({
         checks.push({
           code: "corrupted-servers-dat",
           status: "warning",
+          path: serversDat,
           action: "auto",
           message: "servers.dat is corrupted or 0-byte (crashes Minecraft NBT loader)",
           autoFix: {

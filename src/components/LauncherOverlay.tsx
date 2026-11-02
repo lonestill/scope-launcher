@@ -9,9 +9,12 @@ import {
   Cpu,
   Database,
   FileArchive,
+  FileCode,
   Gamepad2,
+  Globe,
   HardDrive,
   LoaderCircle,
+  Lock,
   MemoryStick,
   Package,
   Play,
@@ -19,6 +22,7 @@ import {
   ScrollText,
   Settings,
   ShieldCheck,
+  SlidersHorizontal,
   TriangleAlert,
   Wrench,
   X,
@@ -419,6 +423,8 @@ export function LauncherOverlay({
 
 function HealthCheck({ check }: { check: InstanceHealthCheck }) {
   const { locale, t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+
   const icon =
     check.status === "pass" ? (
       <Check size={14} />
@@ -434,11 +440,19 @@ function HealthCheck({ check }: { check: InstanceHealthCheck }) {
         ? MemoryStick
         : check.code.startsWith("disk")
           ? HardDrive
-          : check.code.startsWith("mods")
+          : check.code.startsWith("mods") || check.code.includes("stray")
             ? Package
             : check.code.includes("directory")
               ? Database
-              : ShieldCheck;
+              : check.code.includes("session-lock")
+                ? Lock
+                : check.code.includes("options")
+                  ? SlidersHorizontal
+                  : check.code.includes("world") || check.code.includes("level-dat")
+                    ? Globe
+                    : check.code.includes("metadata") || check.code.includes("client-jar")
+                      ? FileCode
+                      : ShieldCheck;
   const label = checkLabel(check.code, t);
   let detail = t(
     check.status === "pass"
@@ -473,15 +487,69 @@ function HealthCheck({ check }: { check: InstanceHealthCheck }) {
     });
   } else if (typeof check.modCount === "number") {
     detail = t("guard.mods.scanned", { count: check.modCount });
+  } else if (check.status !== "pass") {
+    if (check.autoFix?.descKey) {
+      detail = t(
+        check.autoFix.descKey as TranslationKey,
+        check.autoFix.payload,
+      );
+    } else if (check.message) {
+      detail = check.message;
+    }
   }
+
+  const tooltipText =
+    check.message ||
+    (check.autoFix?.descKey
+      ? t(check.autoFix.descKey as TranslationKey, check.autoFix.payload)
+      : undefined) ||
+    check.duplicateFiles?.join("\n") ||
+    check.path ||
+    detail;
+
+  const isInteractive =
+    check.status !== "pass" || Boolean(check.path || check.duplicateFiles?.length);
+
   return (
-    <div className={`guard-check guard-check--${check.status}`}>
+    <div
+      className={`guard-check guard-check--${check.status}${
+        isInteractive ? " guard-check--interactive" : ""
+      }`}
+      onClick={() => isInteractive && setExpanded((val) => !val)}
+      title={tooltipText}
+    >
       <span className="guard-check__kind">
         <Icon size={15} />
       </span>
       <span>
         <strong>{label}</strong>
-        <small title={check.duplicateFiles?.join("\n")}>{detail}</small>
+        <small
+          style={
+            expanded
+              ? {
+                  whiteSpace: "normal",
+                  wordBreak: "break-word",
+                  lineHeight: 1.4,
+                  marginTop: 3,
+                }
+              : undefined
+          }
+        >
+          {detail}
+        </small>
+        {expanded && check.path && (
+          <code
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              marginTop: 4,
+              fontFamily: "monospace",
+              wordBreak: "break-all",
+            }}
+          >
+            {check.path}
+          </code>
+        )}
       </span>
       <i>{icon}</i>
     </div>
@@ -497,6 +565,18 @@ function checkLabel(
   if (code.startsWith("disk")) return t("guard.check.disk");
   if (code.startsWith("mods")) return t("guard.check.mods");
   if (code.includes("directory")) return t("guard.check.directory");
+  if (code.includes("session-lock")) return t("guard.check.sessionLock");
+  if (code.includes("options")) return t("guard.check.options");
+  if (code.includes("world") || code.includes("level-dat")) return t("guard.check.worldSave");
+  if (code.includes("stray")) return t("guard.check.strayJar");
+  if (code.includes("fabric-api")) return t("guard.check.fabricApi");
+  if (code.includes("usercache")) return t("guard.check.usercache");
+  if (code.includes("server")) return t("guard.check.serverList");
+  if (code.includes("optifine")) return t("guard.check.optifine");
+  if (code.includes("metadata")) return t("guard.check.versionMetadata");
+  if (code.includes("client-jar")) return t("guard.check.clientJar");
+  if (code.includes("loader")) return t("guard.check.loader");
+  if (code.includes("gc") || code.includes("wayland")) return t("guard.check.jvmArgs");
   return t("guard.check.files");
 }
 

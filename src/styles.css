@@ -8779,8 +8779,26 @@ kbd {
   color: var(--warning);
 }
 
+.guard-check--warning strong {
+  color: #fbbf24;
+}
+
 .guard-check--error > i {
   color: var(--danger);
+}
+
+.guard-check--error strong {
+  color: #f87171;
+}
+
+.guard-check--interactive {
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background-color 0.15s ease;
+}
+
+.guard-check--interactive:hover {
+  background: rgba(255, 255, 255, 0.025);
 }
 
 .launch-panel__actions {
