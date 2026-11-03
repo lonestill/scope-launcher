@@ -64,9 +64,21 @@ export function LibraryPage({
   const [compact, setCompact] = useState(false);
   const [sortAscending, setSortAscending] = useState(true);
   const [importMenuOpen, setImportMenuOpen] = useState(false);
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
   const importMenuRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   useSearchFocus(searchRef);
+
+  const isMac = useMemo(() => {
+    if (typeof window !== "undefined") {
+      const onyxPlatform = (window as unknown as { onyx?: { platform?: string } }).onyx?.platform;
+      if (onyxPlatform) {
+        return onyxPlatform === "darwin" || onyxPlatform === "macos";
+      }
+      return /Mac|iPhone|iPod|iPad/i.test(navigator.userAgent);
+    }
+    return false;
+  }, []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -230,8 +242,13 @@ export function LibraryPage({
             ref={searchRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onFocus={() => setIsSearchFocused(true)}
+            onBlur={() => setIsSearchFocused(false)}
             placeholder={t("library.search")}
           />
+          {!query && !isSearchFocused && (
+            <kbd className="titlebar-command-hint">{isMac ? "⌘F" : "Ctrl F"}</kbd>
+          )}
           {query && (
             <button onClick={() => setQuery("")} aria-label={t("library.clear")}>
               ×
