@@ -1,6 +1,7 @@
 const fsp = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { inspectModJar } = require("./mod-metadata.cjs");
 const { fetchJson, hashFile, downloadFile } = require("./network.cjs");
 
 const MODRINTH_API = "https://api.modrinth.com/v2";
@@ -49,6 +50,143 @@ function selectVersionFile(version) {
     ) ||
     null
   );
+}
+
+function metadataPathForFile(filePath) {
+  return `${filePath}.meta.json`;
+}
+
+function looksLikeDisplayVersion(value) {
+  if (typeof value !== "string") return false;
+  const version = value.trim();
+  if (!version || version.length > 128) return false;
+  return /(?:^|[a-z])\d+\.\d+/.test(version) ||
+    /(?:^|[-_.])\d+\.[A-Za-z0-9_-]+/.test(version) ||
+    /^mc\d+\.\d+.*$/i.test(version) ||
+    /^\d+\.\d+(?:\.\d+)?(?:[-_.][A-Za-z0-9]+)*$/i.test(version);
+}
+
+function looksLikeOpaqueVersion(value) {
+  if (typeof value !== "string") return false;
+  const version = value.trim();
+  if (!version || version.length > 128) return false;
+  return /^v?[A-Za-z0-9_-]{6,}$/.test(version) && !looksLikeDisplayVersion(version);
+}
+
+function jarBasenameForVersion(filePath) {
+  return path.basename(filePath).replace(/\.jar(?:\.disabled)?$/i, "");
+}
+
+function normalizeDisplayVersion(value) {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  return trimmed.replace(/^v+/i, "");
+}
+
+function chooseDisplayVersion(preferredValue, inferredValue, fallbackName = "") {
+  const jarName = safeNameFromFallback(fallbackName);
+
+  for (const candidate of [preferredValue, inferredValue]) {
+    if (looksLikeDisplayVersion(candidate)) {
+      return normalizeDisplayVersion(candidate);
+    }
+  }
+
+  const opaque = [preferredValue, inferredValue].find((candidate) =>
+    looksLikeOpaqueVersion(candidate),
+  );
+  if (opaque && jarName) {
+    return jarName;
+  }
+
+  const fallback = inferredValue?.trim() || preferredValue?.trim() || "";
+  if (fallback && !looksLikeOpaqueVersion(fallback)) {
+    return normalizeDisplayVersion(fallback);
+  }
+  return jarName;
+}
+
+function safeNameFromFallback(fallbackName) {
+  const name = String(fallbackName || "").trim();
+  return name.replace(/\.jar(?:\.disabled)?$/i, "");
+}
+
+async function writeModMetadata(filePath, metadata) {
+  const outputPath = metadataPathForFile(filePath);
+  const inferred = await inspectModJar(filePath).catch(() => null);
+  const payload = {
+    projectName: metadata?.projectName || inferred?.name || "",
+    projectUrl: metadata?.projectUrl || "",
+    projectVersion: chooseDisplayVersion(
+      inferred?.version,
+      metadata?.projectVersion,
+      jarBasenameForVersion(filePath),
+    ),
+    catalogProjectId: metadata?.catalogProjectId
+      ? String(metadata.catalogProjectId)
+      : "",
+    catalogVersionId: metadata?.catalogVersionId
+      ? String(metadata.catalogVersionId)
+      : "",
+    source: metadata?.source || "",
+    updatedAt: new Date().toISOString(),
+  };
+  await fsp.mkdir(path.dirname(outputPath), { recursive: true });
+  await fsp.writeFile(outputPath, JSON.stringify(payload, null, 2), "utf8");
+  return payload;
+}
+
+async function readModMetadata(filePath) {
+  try {
+    const text = await fsp.readFile(metadataPathForFile(filePath), "utf8");
+    const parsed = JSON.parse(text);
+    const inferred = await inspectModJar(filePath).catch(() => null);
+    const version = chooseDisplayVersion(
+      inferred?.version,
+      typeof parsed?.projectVersion === "string" ? parsed.projectVersion : "",
+      jarBasenameForVersion(filePath),
+    );
+    return {
+      projectName:
+        typeof parsed?.projectName === "string" && parsed.projectName
+          ? parsed.projectName
+          : inferred?.name || "",
+      modName: inferred?.name || "",
+      modVersion: inferred?.version || "",
+      projectUrl: typeof parsed?.projectUrl === "string" ? parsed.projectUrl : "",
+      projectVersion: version,
+      catalogProjectId:
+        typeof parsed?.catalogProjectId === "string"
+          ? parsed.catalogProjectId
+          : undefined,
+      catalogVersionId:
+        typeof parsed?.catalogVersionId === "string"
+          ? parsed.catalogVersionId
+          : undefined,
+      modIds: Array.isArray(inferred?.ids) ? inferred.ids : [],
+      source:
+        parsed?.source === "modrinth" || parsed?.source === "curseforge"
+          ? parsed.source
+          : undefined,
+    };
+  } catch {
+    const inferred = await inspectModJar(filePath).catch(() => null);
+    if (!inferred?.name && !inferred?.version) return null;
+    return {
+      projectName: inferred?.name || "",
+      modName: inferred?.name || "",
+      modVersion: inferred?.version || "",
+      projectUrl: "",
+      projectVersion: chooseDisplayVersion(
+        inferred?.version,
+        "",
+        jarBasenameForVersion(filePath),
+      ),
+      modIds: Array.isArray(inferred?.ids) ? inferred.ids : [],
+      source: undefined,
+    };
+  }
 }
 
 async function contentHashes(items, concurrency = 6) {
@@ -152,6 +290,7 @@ async function updateMod({
   onProgress,
 }) {
   const source = assertManagedFile(instancesRoot, filePath);
+  const savedMetadata = await readModMetadata(source);
   const { sha1, version, file } = await latestVersionForFile({
     filePath: source,
     loader,
@@ -211,6 +350,14 @@ async function updateMod({
       }
     }
     await fsp.rename(staging, destination);
+    await writeModMetadata(destination, {
+      projectName: savedMetadata?.projectName || "",
+      projectUrl: savedMetadata?.projectUrl || "",
+      projectVersion: version?.version_number || "",
+      catalogProjectId: version?.project_id || savedMetadata?.catalogProjectId,
+      catalogVersionId: version?.id || savedMetadata?.catalogVersionId,
+      source: "modrinth",
+    });
   } catch (error) {
     const sourceExists = await fsp.stat(source).catch(() => null);
     const backupExists = await fsp.stat(backup).catch(() => null);
@@ -453,8 +600,10 @@ module.exports = {
   selectVersionFile,
   checkModUpdates,
   latestVersionForFile,
+  readModMetadata,
   safeModrinthDownload,
   updateMod,
   listModHistory,
   rollbackModUpdate,
+  writeModMetadata,
 };

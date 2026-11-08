@@ -1276,6 +1276,50 @@
   min-height: 420px;
 }
 
+.instance-content-toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.instance-content-export {
+  position: relative;
+}
+
+.instance-content-export__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  min-width: 180px;
+  flex-direction: column;
+  padding: 6px;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(8, 10, 12, 0.92);
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.3);
+}
+
+.instance-content-export__menu button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--text-soft);
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+}
+
+.instance-content-export__menu button:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
 .instance-content-head-actions {
   display: flex;
   gap: 6px;
