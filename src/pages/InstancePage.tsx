@@ -193,6 +193,7 @@ export function InstancePage({
   const [contentQuery, setContentQuery] = useState("");
   const [contentBusy, setContentBusy] = useState(false);
   const [contentAction, setContentAction] = useState<string | null>(null);
+  const [modListMenuOpen, setModListMenuOpen] = useState(false);
   const [contentHistory, setContentHistory] = useState<ContentHistoryEntry[]>(
     [],
   );
@@ -224,7 +225,18 @@ export function InstancePage({
     useState<string | null>(null);
   const contentRequestRef = useRef(0);
   const contentSearchRef = useRef<HTMLInputElement>(null);
+  const modListMenuRef = useRef<HTMLDivElement>(null);
+  const notifyRef = useRef(onNotify);
+  const tRef = useRef(t);
   useSearchFocus(contentSearchRef);
+
+  useEffect(() => {
+    notifyRef.current = onNotify;
+  }, [onNotify]);
+
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
 
   const [screenshots, setScreenshots] = useState<InstanceScreenshot[]>([]);
   const [loadingScreenshots, setLoadingScreenshots] = useState(false);
@@ -584,6 +596,230 @@ export function InstancePage({
     }
   }, [instance.id, onNotify, t]);
 
+  const displayName =
+    isBuiltinPureGame(instance)
+      ? t("home.defaultName")
+      : instance.name;
+
+  const resolveModListMetadata = useCallback(async (items: InstanceContent[]) => {
+    const normalizeIdentity = (value?: string | number) =>
+      String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const metadataByPath = new Map<
+      string,
+      {
+        projectName?: string;
+        projectUrl?: string;
+        projectVersion?: string;
+        source?: "modrinth" | "curseforge";
+      }
+    >();
+    await Promise.all(
+      items.map(async (item) => {
+        const identities = new Set(
+          [item.modName, ...(item.modIds || [])]
+            .map(normalizeIdentity)
+            .filter(Boolean),
+        );
+        const cachedMatchesJar =
+          !identities.size ||
+          [item.projectName, item.catalogProjectId]
+            .map(normalizeIdentity)
+            .some((identity) => identities.has(identity));
+
+        if (
+          item.projectName &&
+          item.projectUrl &&
+          item.projectVersion &&
+          cachedMatchesJar
+        ) {
+          metadataByPath.set(item.path, {
+            projectName: item.projectName,
+            projectUrl: item.projectUrl,
+            projectVersion: item.projectVersion,
+            source: item.source || "modrinth",
+          });
+          return;
+        }
+
+        if (!identities.size) return;
+
+        const searchSources: Array<"modrinth" | "curseforge"> = ["modrinth", "curseforge"];
+        for (const source of searchSources) {
+          try {
+            const query = item.modIds?.[0] || item.projectName || "";
+            const response = await window.onyx.catalog.search(query, "mod", {
+              source,
+              index: "relevance",
+              offset: 0,
+            });
+            const hit = response?.hits?.find((candidate) => {
+              const project = candidate as {
+                title?: string;
+                slug?: string;
+                project_id?: string;
+                curseforgeId?: number;
+              };
+              const hitIdentities = [
+                project.title,
+                project.slug,
+                project.project_id,
+                project.curseforgeId,
+              ]
+                .map(normalizeIdentity)
+                .filter(Boolean);
+              return hitIdentities.some((identity) => identities.has(identity));
+            }) as
+              | ({ title?: string; slug?: string; project_id?: string; curseforgeId?: number; source?: "modrinth" | "curseforge" } | undefined)
+              | null;
+            if (hit?.title && hit.slug) {
+              const projectUrl = source === "modrinth"
+                ? `https://modrinth.com/mod/${hit.slug}`
+                : `https://www.curseforge.com/minecraft/mc-mods/${hit.slug}`;
+              metadataByPath.set(item.path, {
+                projectName: hit.title,
+                projectUrl,
+                projectVersion:
+                  item.modVersion || item.projectVersion || item.update?.versionNumber,
+                source,
+              });
+              return;
+            }
+          } catch {
+            // Try the next source if this catalog query fails.
+          }
+        }
+
+        metadataByPath.set(item.path, {
+          projectName:
+            item.modName ||
+            item.name.replace(/\.(jar|disabled)$/i, "").replace(/\.disabled$/i, ""),
+          projectVersion:
+            item.modVersion ||
+            item.name.replace(/\.disabled$/i, "").replace(/\.jar$/i, ""),
+        });
+      }),
+    );
+
+    return items.map((item) => {
+      const metadata = metadataByPath.get(item.path);
+      if (!metadata) return item;
+      return {
+        ...item,
+        source: metadata.source,
+        projectName: metadata.projectName || item.projectName || item.name,
+        projectUrl: metadata.projectUrl || item.projectUrl,
+        projectVersion: metadata.projectVersion || item.projectVersion,
+      };
+    });
+  }, []);
+
+  const buildModListText = useCallback(
+    (items: InstanceContent[], format: "discord" | "plain" | "table") => {
+      const sorted = [...items].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      );
+      const total = sorted.length;
+      const normalizeDisplayVersion = (value: string) => value.trim().replace(/^v+/i, "");
+      const getDisplayName = (item: InstanceContent) =>
+        item.projectName || item.name.replace(/\.(jar|disabled)$/i, "").replace(/\.disabled$/i, "");
+      const versionFor = (item: InstanceContent) =>
+        (item.projectVersion || item.update?.versionNumber || "").trim();
+      const isJarNameVersion = (item: InstanceContent, version: string) => {
+        const jarName = item.name.replace(/\.disabled$/i, "").replace(/\.jar$/i, "");
+        return version.toLowerCase() === jarName.toLowerCase();
+      };
+      const formatVersion = (item: InstanceContent) => {
+        const version = versionFor(item);
+        if (!version) return "";
+        if (isJarNameVersion(item, version)) return ` (${version})`;
+        const normalized = normalizeDisplayVersion(version);
+        return normalized ? ` (${normalized})` : "";
+      };
+      const formatModLine = (item: InstanceContent) => {
+        const displayName = getDisplayName(item);
+        const label = item.projectUrl
+          ? `[${displayName}](${item.projectUrl})`
+          : displayName;
+        const versionText = formatVersion(item);
+        const statusText = item.enabled ? "" : ` ${t("instancePage.modList.disabled")}`;
+        return `${label}${versionText}${statusText}`;
+      };
+      const formatTableVersion = (item: InstanceContent) => {
+        const version = versionFor(item) || "—";
+        if (version === "—" || isJarNameVersion(item, version)) return version;
+        return normalizeDisplayVersion(version);
+      };
+
+      if (format === "plain") {
+        return sorted
+          .map((item) => {
+            const displayName = getDisplayName(item);
+            const versionText = formatVersion(item);
+            const urlText = item.projectUrl ? ` — ${item.projectUrl}` : "";
+            return `${displayName}${versionText}${item.enabled ? "" : ` ${t("instancePage.modList.disabled")}`}${urlText}`;
+          })
+          .join("\n");
+      }
+
+      if (format === "table") {
+        const header = "| Mod | Version | Status |\n| --- | --- | --- |";
+        const rows = sorted
+          .map((item) => {
+            const displayName = getDisplayName(item);
+            const linkText = item.projectUrl ? `[${displayName}](${item.projectUrl})` : displayName;
+            const version = formatTableVersion(item);
+            const status = item.enabled ? t("instancePage.modList.enabled") : t("instancePage.modList.disabled");
+            return `| ${linkText} | ${version} | ${status} |`;
+          })
+          .join("\n");
+        return `${header}\n${rows}`;
+      }
+
+      return [
+        `**${displayName} - ${t("instancePage.modList.header", { count: total })}**`,
+        ...sorted.map((item) => `- ${formatModLine(item)}`),
+      ].join("\n");
+    },
+    [displayName, t],
+  );
+
+  const handleExportModList = useCallback(
+    async (format: "discord" | "plain" | "table") => {
+      try {
+        const resolvedItems = await resolveModListMetadata(content);
+        const text = buildModListText(resolvedItems, format);
+        await navigator.clipboard.writeText(text);
+        setModListMenuOpen(false);
+        onNotify(
+          "success",
+          t("instancePage.modList.exported"),
+          t("instancePage.modList.exportedHint"),
+        );
+      } catch {
+        onNotify(
+          "warning",
+          t("instancePage.modList.failed"),
+          t("instancePage.modList.failedHint"),
+        );
+      }
+    },
+    [buildModListText, content, onNotify, resolveModListMetadata, t],
+  );
+
+  useEffect(() => {
+    if (!modListMenuOpen) return;
+    const handleClick = (event: MouseEvent) => {
+      if (
+        modListMenuRef.current &&
+        !modListMenuRef.current.contains(event.target as Node)
+      ) {
+        setModListMenuOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", handleClick);
+    return () => window.removeEventListener("mousedown", handleClick);
+  }, [modListMenuOpen]);
+
   useEffect(() => {
     const nextServers = legacyServers(
       instance.settings,
@@ -712,12 +948,12 @@ export function InstancePage({
           setModProfiles([]);
         }
       } catch (error) {
-        onNotify(
+        notifyRef.current(
           "warning",
-          t("instancePage.content.loadFailed"),
+          tRef.current("instancePage.content.loadFailed"),
           error instanceof Error
             ? error.message
-            : t("instancePage.content.loadFailedHint"),
+            : tRef.current("instancePage.content.loadFailedHint"),
         );
       } finally {
         if (requestId === contentRequestRef.current) {
@@ -725,7 +961,7 @@ export function InstancePage({
         }
       }
     },
-    [contentKind, instance.id, onNotify, t],
+    [contentKind, instance.id],
   );
 
   const loadStorage = useCallback(async (force = false) => {
@@ -763,7 +999,7 @@ export function InstancePage({
 
   useEffect(() => {
     if (tab === "content") void loadContent(false);
-  }, [loadContent, tab]);
+  }, [tab, contentKind, instance.id, loadContent]);
 
   useEffect(() => {
     if (tab === "diagnostics" && diagnosticTab === "storage") void loadStorage();
@@ -1434,10 +1670,6 @@ export function InstancePage({
     item.name.toLowerCase().includes(contentQuery.trim().toLowerCase()),
   );
   const updates = content.filter((item) => item.update).length;
-  const displayName =
-    isBuiltinPureGame(instance)
-      ? t("home.defaultName")
-      : instance.name;
 
   return (
     <motion.div
@@ -2478,15 +2710,57 @@ export function InstancePage({
                 </button>
               ))}
             </div>
-            <label className="input-shell input-shell--search">
-              <Search size={15} />
-              <input
-                ref={contentSearchRef}
-                value={contentQuery}
-                placeholder={t("instancePage.content.search")}
-                onChange={(event) => setContentQuery(event.target.value)}
-              />
-            </label>
+            <div className="instance-content-toolbar__actions">
+              {contentKind === "mods" && (
+                <div className="instance-content-export" ref={modListMenuRef}>
+                  <button
+                    type="button"
+                    className="button button--mini"
+                    aria-label={t("instancePage.modList.export")}
+                    aria-expanded={modListMenuOpen}
+                    aria-haspopup="menu"
+                    onClick={() => setModListMenuOpen((open) => !open)}
+                  >
+                    <ClipboardCopy size={14} />
+                    {t("instancePage.modList.export")}
+                  </button>
+                  {modListMenuOpen && (
+                    <div className="instance-content-export__menu" role="menu">
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void handleExportModList("discord")}
+                      >
+                        {t("instancePage.modList.format.discord")}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void handleExportModList("plain")}
+                      >
+                        {t("instancePage.modList.format.plain")}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void handleExportModList("table")}
+                      >
+                        {t("instancePage.modList.format.table")}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+              <label className="input-shell input-shell--search">
+                <Search size={15} />
+                <input
+                  ref={contentSearchRef}
+                  value={contentQuery}
+                  placeholder={t("instancePage.content.search")}
+                  onChange={(event) => setContentQuery(event.target.value)}
+                />
+              </label>
+            </div>
           </div>
           {contentKind === "mods" && profilesOpen && (
             <section className="instance-mod-profiles">

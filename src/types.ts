@@ -494,7 +494,15 @@ export interface InstanceContent {
   modifiedAt: string;
   kind?: "mods" | "resourcepacks" | "shaderpacks";
   sha1?: string;
+  source?: "modrinth" | "curseforge";
   projectId?: string;
+  projectName?: string;
+  modName?: string;
+  modVersion?: string;
+  projectUrl?: string;
+  modIds?: string[];
+  catalogProjectId?: string;
+  catalogVersionId?: string;
   currentVersionId?: string;
   projectVersion?: string;
   update?: {

@@ -29,9 +29,11 @@ const { ModpackService } = require("./services/modpack.cjs");
 const {
   checkModUpdates,
   listModHistory,
+  readModMetadata,
   rollbackModUpdate,
   updateMod,
   safeModrinthDownload,
+  writeModMetadata,
 } = require("./services/content.cjs");
 const {
   directoryStats,
@@ -971,6 +973,14 @@ async function installModToInstance(project, targetInstance, task, signal) {
         });
       },
     });
+    await writeModMetadata(dest, {
+      projectName: project.title,
+      projectVersion: chosen.displayName || chosen.fileName,
+      projectUrl: project.links?.website || project.links?.source || `https://www.curseforge.com/minecraft/mc-mods/${project.slug}`,
+      catalogProjectId: modId,
+      catalogVersionId: chosen.id,
+      source: "curseforge",
+    });
     return {
       destination: dest,
       dependencies: 0,
@@ -1061,6 +1071,14 @@ async function installModToInstance(project, targetInstance, task, signal) {
         });
       },
     });
+    await writeModMetadata(destination, {
+      projectName: project.title,
+      projectVersion: currentVersion?.version_number || file.filename,
+      projectUrl: project.slug ? `https://modrinth.com/mod/${project.slug}` : "",
+      catalogProjectId: project.project_id,
+      catalogVersionId: currentVersion?.id,
+      source: "modrinth",
+    });
     installed.push({
       destination,
       version: currentVersion,
@@ -1111,6 +1129,7 @@ async function listInstanceContent(id, kind = "mods") {
         .map(async (entry) => {
           const filePath = path.join(contentDirectory, entry.name);
           const stat = await fsp.stat(filePath);
+          const metadata = kind === "mods" ? await readModMetadata(filePath) : null;
           return {
             name: entry.name.replace(/\.disabled$/, ""),
             path: filePath,
@@ -1118,6 +1137,15 @@ async function listInstanceContent(id, kind = "mods") {
             size: stat.size,
             modifiedAt: stat.mtime.toISOString(),
             kind,
+            projectName: metadata?.projectName || undefined,
+            modName: metadata?.modName || undefined,
+            modVersion: metadata?.modVersion || undefined,
+            projectUrl: metadata?.projectUrl || undefined,
+            projectVersion: metadata?.projectVersion || undefined,
+            modIds: metadata?.modIds || [],
+            catalogProjectId: metadata?.catalogProjectId || undefined,
+            catalogVersionId: metadata?.catalogVersionId || undefined,
+            source: metadata?.source || undefined,
           };
         }),
     );

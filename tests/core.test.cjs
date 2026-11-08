@@ -60,9 +60,11 @@ const {
 } = require("../electron/services/maintenance.cjs");
 const {
   listModHistory,
+  readModMetadata,
   rollbackModUpdate,
   selectVersionFile,
   safeModrinthDownload,
+  writeModMetadata,
 } = require("../electron/services/content.cjs");
 const {
   analyzeMinecraftLog,
@@ -990,13 +992,10 @@ test(
   },
 );
 
-test("An installed Java runtime is detected and reports its major version", async (context) => {
+test("An installed Java runtime is detected and reports its major version", async () => {
   const java = await findSystemJava();
-  if (!java) {
-    context.skip("Java is not available in the test system PATH");
-    return;
-  }
-  assert.ok(java.major >= 17);
+  assert.ok(java, "Java should be available in the test system PATH");
+  assert.ok(java.major >= 17, `System Java major version should be at least 17 (got ${java.major})`);
   assert.ok(await inspectJava(java.executable));
 });
 
@@ -1233,6 +1232,81 @@ test("The server check handles Minecraft DNS SRV and explicit ports", async () =
     port: 25566,
     viaSrv: false,
   });
+});
+
+test("Mod metadata sidecar preserves project name, version, and link", async () => {
+  const modPath = path.join(temporaryRoot, "saved-metadata", "sodium.jar");
+  await fsp.mkdir(path.dirname(modPath), { recursive: true });
+  await writeTestJar(modPath, {
+    "fabric.mod.json": JSON.stringify({
+      schemaVersion: 1,
+      id: "sodium",
+      name: "Sodium",
+      version: "mc1.21.1-0.8.13-fabric",
+    }),
+  });
+
+  await writeModMetadata(modPath, {
+    projectName: "Sodium",
+    projectVersion: "0.116.17+1.21.1",
+    projectUrl: "https://modrinth.com/mod/sodium",
+    catalogProjectId: "sodium",
+    catalogVersionId: "sodium-release-123",
+    source: "modrinth",
+  });
+
+  const sidecarPath = `${modPath}.meta.json`;
+  const sidecar = JSON.parse(await fsp.readFile(sidecarPath, "utf8"));
+  sidecar.projectVersion = "0.116.17+1.21.1";
+  await fsp.writeFile(sidecarPath, JSON.stringify(sidecar), "utf8");
+
+  const metadata = await readModMetadata(modPath);
+  assert.deepEqual(metadata, {
+    projectName: "Sodium",
+    modName: "Sodium",
+    modVersion: "mc1.21.1-0.8.13-fabric",
+    projectVersion: "mc1.21.1-0.8.13-fabric",
+    projectUrl: "https://modrinth.com/mod/sodium",
+    modIds: ["sodium"],
+    catalogProjectId: "sodium",
+    catalogVersionId: "sodium-release-123",
+    source: "modrinth",
+  });
+});
+
+test("Mod metadata falls back to the jar filename when the saved version is an opaque API token", async () => {
+  const modPath = path.join(temporaryRoot, "saved-metadata", "my-mod-archive.jar");
+  await fsp.mkdir(path.dirname(modPath), { recursive: true });
+  await writeTestJar(modPath, {});
+
+  await writeModMetadata(modPath, {
+    projectName: "My Mod Archive",
+    projectVersion: "vNM9w06Kr",
+    projectUrl: "https://modrinth.com/mod/my-mod-archive",
+    source: "modrinth",
+  });
+
+  const metadata = await readModMetadata(modPath);
+  assert.equal(metadata.projectVersion, "my-mod-archive");
+  assert.equal(metadata.projectName, "My Mod Archive");
+  assert.equal(metadata.modName, "");
+});
+
+test("Mod metadata strips a leading v from display versions", async () => {
+  const modPath = path.join(temporaryRoot, "saved-metadata", "version-v.jar");
+  await fsp.mkdir(path.dirname(modPath), { recursive: true });
+  await writeTestJar(modPath, {
+    "fabric.mod.json": JSON.stringify({
+      schemaVersion: 1,
+      id: "version_v",
+      name: "Version V",
+      version: "v0.116.17+1.21.1",
+    }),
+  });
+
+  const metadata = await readModMetadata(modPath);
+  assert.equal(metadata.projectVersion, "0.116.17+1.21.1");
+  assert.equal(metadata.modVersion, "v0.116.17+1.21.1");
 });
 
 test("Guard finds duplicate internal IDs across mod JARs", async () => {
